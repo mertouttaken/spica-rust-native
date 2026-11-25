@@ -16,29 +16,25 @@ import org.bukkit.entity.Tameable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumSet;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.Predicate;
 
 /**
  * Live Purpur 1.21.4 Entity AI LOD Optimizer & Mob-Cluster Hotspot Scanner.
  *
  * Snapshots loaded mobs & players into the zero-copy off-heap {@link EntityBatchArena},
  * evaluates nearest-player distances and spatial crowding inside Rust, and safely toggles
- * {@link Mob#setAware(boolean)} for distant non-essential mobs to save Main-Thread MSPT.
+ * {@link Mob#setAware(boolean)} via {@link MobAiOwnershipManager} to prevent permanent NBT leakage.
  */
 public final class EntityLodOptimizer {
 
     private final SpicaRustAPI api;
+    private final MobAiOwnershipManager aiOwnership;
     private final EntityBatchArena mainThreadArena = new EntityBatchArena(4096, 256);
     private final List<Mob> mobScratch = new ArrayList<>(4096);
-    private final Set<UUID> hibernatedByUs = new HashSet<>();
     private final Set<EntityType> excludedTypes = EnumSet.noneOf(EntityType.class);
-
-    private Predicate<UUID> externalAiManagedPredicate;
 
     private boolean enabled = true;
     private float baseFullAiRange = 32.0f;
@@ -55,20 +51,13 @@ public final class EntityLodOptimizer {
     private int lastFullMobs = 0;
     private int lastHibernatedMobs = 0;
 
-    public EntityLodOptimizer(SpicaRustAPI api) {
+    public EntityLodOptimizer(SpicaRustAPI api, MobAiOwnershipManager aiOwnership) {
         this.api = api;
-    }
-
-    /**
-     * Connects an external AI-suppression check (e.g. {@link FarmVillagerGovernor#isMobManagedByFarmGovernor(UUID)})
-     * so waking a nearby mob does not override active mob-farm or trading-hall throttling.
-     */
-    public void setExternalAiManagedPredicate(Predicate<UUID> externalAiManagedPredicate) {
-        this.externalAiManagedPredicate = externalAiManagedPredicate;
+        this.aiOwnership = aiOwnership;
     }
 
     public boolean isHibernatedByUs(UUID id) {
-        return hibernatedByUs.contains(id);
+        return aiOwnership.isAiSuppressedByReason(id, MobAiOwnershipManager.REASON_LOD);
     }
 
     public void reloadConfig(FileConfiguration cfg) {
@@ -121,6 +110,7 @@ public final class EntityLodOptimizer {
                     continue;
                 }
                 if (isProtectedMob(mob)) {
+                    aiOwnership.releaseAi(mob, MobAiOwnershipManager.REASON_LOD);
                     continue;
                 }
                 mobScratch.add(mob);
@@ -150,33 +140,27 @@ public final class EntityLodOptimizer {
                 mainThreadArena, mobCount, playerCount, fullAiRange, hibernateRange
             );
             totalMobs += mobCount;
-            fullMobs += Math.max(0, activeInWorld);
+            // K1 failure semantics: never consume stale outIntB buffer slots if native call failed
+            if (activeInWorld < 0) {
+                continue;
+            }
+            fullMobs += activeInWorld;
 
             for (int i = 0; i < mobCount; i++) {
                 Mob mob = mobScratch.get(i);
                 int tier = mainThreadArena.outIntB.get(i);
-                UUID id = mob.getUniqueId();
 
                 if (tier == RustNative.LOD_HIBERNATE) {
-                    if (mob.isAware()) {
-                        mob.setAware(false);
-                        hibernatedByUs.add(id);
-                    } else if (externalAiManagedPredicate != null && externalAiManagedPredicate.test(id)) {
-                        hibernatedByUs.add(id);
+                    if (aiOwnership.suppressAi(mob, MobAiOwnershipManager.REASON_LOD)) {
+                        hibernatedCount++;
                     }
-                    hibernatedCount++;
                 } else {
-                    if (hibernatedByUs.remove(id)) {
-                        boolean managedExternally = externalAiManagedPredicate != null
-                            && externalAiManagedPredicate.test(id);
-                        if (!managedExternally && !mob.isAware()) {
-                            mob.setAware(true);
-                        }
-                    }
+                    aiOwnership.releaseAi(mob, MobAiOwnershipManager.REASON_LOD);
                 }
             }
         }
 
+        mobScratch.clear();
         this.lastTotalMobs = totalMobs;
         this.lastFullMobs = fullMobs;
         this.lastHibernatedMobs = hibernatedCount;
@@ -184,19 +168,10 @@ public final class EntityLodOptimizer {
     }
 
     /**
-     * Restores awareness for every mob hibernated by this plugin (called on disable/reload).
+     * Restores awareness for every mob hibernated by this optimizer (called on disable/reload).
      */
     public int restoreAll() {
-        int restored = 0;
-        for (UUID id : hibernatedByUs) {
-            Entity entity = Bukkit.getEntity(id);
-            if (entity instanceof Mob mob && !mob.isAware()) {
-                mob.setAware(true);
-                restored++;
-            }
-        }
-        hibernatedByUs.clear();
-        return restored;
+        return aiOwnership.restoreAllForReason(MobAiOwnershipManager.REASON_LOD);
     }
 
     /**
@@ -228,6 +203,11 @@ public final class EntityLodOptimizer {
         long rustStart = System.nanoTime();
         long totalColliding = api.computeCollisions(mainThreadArena, n, 2.0f, 0.5f, 0.5f);
         double rustMs = (System.nanoTime() - rustStart) / 1_000_000.0;
+        if (totalColliding < 0L) {
+            mobScratch.clear();
+            double totalMs = (System.nanoTime() - start) / 1_000_000.0;
+            return new WorldScanResult(world.getName(), n, 0L, 0, 0, rustMs, totalMs, null);
+        }
 
         int crowdedMobs = 0;
         int worstNeighbors = 0;
@@ -244,6 +224,7 @@ public final class EntityLodOptimizer {
             }
         }
 
+        mobScratch.clear();
         double totalMs = (System.nanoTime() - start) / 1_000_000.0;
         return new WorldScanResult(
             world.getName(), n, totalColliding, crowdedMobs, worstNeighbors, rustMs, totalMs, worstLocation
@@ -321,7 +302,7 @@ public final class EntityLodOptimizer {
     }
 
     public int getTrackedHibernatedSize() {
-        return hibernatedByUs.size();
+        return aiOwnership.countByAiReason(MobAiOwnershipManager.REASON_LOD);
     }
 
     public record WorldScanResult(

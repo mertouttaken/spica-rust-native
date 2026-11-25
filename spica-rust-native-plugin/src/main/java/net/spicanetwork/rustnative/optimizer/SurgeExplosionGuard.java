@@ -19,18 +19,17 @@ import org.bukkit.event.block.BlockExplodeEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
-import org.bukkit.inventory.ItemStack;
+import org.bukkit.event.world.WorldUnloadEvent;
 import org.bukkit.plugin.Plugin;
+import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -50,7 +49,6 @@ public final class SurgeExplosionGuard implements Listener {
 
     private static final long ACTIONBAR_COOLDOWN_MS = 3_000L;
     private static final long CHUNK_WINDOW_MS = 1_000L;
-    private static final int INFINITE_PICKUP_DELAY_THRESHOLD = 32_767;
     private static final int MAX_EXPLOSION_MERGE_PAIRS = 2048;
 
     private final Plugin plugin;
@@ -60,8 +58,12 @@ public final class SurgeExplosionGuard implements Listener {
     private final List<Item> itemScratch = new ArrayList<>(1024);
     private final Location scratchLoc = new Location(null, 0.0, 0.0, 0.0);
 
-    private final Set<UUID> pendingExplosionWorlds = new HashSet<>();
+    private final Map<UUID, List<ExplosionSpot>> pendingExplosionsByWorld = new HashMap<>();
+    private final Map<UUID, BukkitTask> pendingExplosionTasks = new HashMap<>();
+    private final Map<UUID, Integer> chunkLoadsByWorldCurrentSec = new HashMap<>();
+    private final Map<UUID, Integer> lastChunkLoadsByWorld = new HashMap<>();
     private final Map<UUID, Long> actionbarCooldownUntilMs = new HashMap<>();
+    private long resetGeneration = 0L;
 
     // Configuration
     private boolean enabled = true;
@@ -75,8 +77,8 @@ public final class SurgeExplosionGuard implements Listener {
     private int explosionMinBlocksTrigger = 8;
     private float explosionMergeRadius = 5.0f;
 
-    // Rolling 1-second chunk-load telemetry (Main Thread only)
-    private long chunkWindowStartMs = System.currentTimeMillis();
+    // Rolling 1-second chunk-load telemetry (Main Thread only, monotonic clock)
+    private long chunkWindowStartNanos = System.nanoTime();
     private int chunkLoadsCurrentSec = 0;
     private int lastChunkLoadsPerSec = 0;
 
@@ -125,13 +127,22 @@ public final class SurgeExplosionGuard implements Listener {
     }
 
     /**
-     * Clears transient pending queues and cooldown maps on disable or reload.
+     * Cancels scheduled explosion tasks and clears transient pending queues and cooldown maps on disable or reload (Y5).
      */
     public void resetPending() {
-        pendingExplosionWorlds.clear();
+        resetGeneration++;
+        for (BukkitTask task : pendingExplosionTasks.values()) {
+            if (task != null) {
+                task.cancel();
+            }
+        }
+        pendingExplosionTasks.clear();
+        pendingExplosionsByWorld.clear();
+        chunkLoadsByWorldCurrentSec.clear();
+        lastChunkLoadsByWorld.clear();
         actionbarCooldownUntilMs.clear();
         chunkLoadsCurrentSec = 0;
-        chunkWindowStartMs = System.currentTimeMillis();
+        chunkWindowStartNanos = System.nanoTime();
         lastGlidingPlayers = 0;
     }
 
@@ -140,7 +151,22 @@ public final class SurgeExplosionGuard implements Listener {
         if (!enabled) {
             return;
         }
-        chunkLoadsCurrentSec += event.isNewChunk() ? 2 : 1;
+        int weight = event.isNewChunk() ? 2 : 1;
+        chunkLoadsCurrentSec += weight;
+        UUID worldId = event.getWorld().getUID();
+        chunkLoadsByWorldCurrentSec.merge(worldId, weight, Integer::sum);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onWorldUnload(WorldUnloadEvent event) {
+        UUID worldId = event.getWorld().getUID();
+        BukkitTask task = pendingExplosionTasks.remove(worldId);
+        if (task != null) {
+            task.cancel();
+        }
+        pendingExplosionsByWorld.remove(worldId);
+        chunkLoadsByWorldCurrentSec.remove(worldId);
+        lastChunkLoadsByWorld.remove(worldId);
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -151,9 +177,10 @@ public final class SurgeExplosionGuard implements Listener {
         if (event.blockList().size() < explosionMinBlocksTrigger) {
             return;
         }
-        World world = event.getLocation().getWorld();
+        Location loc = event.getLocation();
+        World world = loc.getWorld();
         if (world != null) {
-            scheduleExplosionBurstMerge(world);
+            scheduleExplosionBurstMerge(world, loc.getX(), loc.getY(), loc.getZ());
         }
     }
 
@@ -165,9 +192,10 @@ public final class SurgeExplosionGuard implements Listener {
         if (event.blockList().size() < explosionMinBlocksTrigger) {
             return;
         }
-        World world = event.getBlock().getWorld();
+        Location loc = event.getBlock().getLocation();
+        World world = loc.getWorld();
         if (world != null) {
-            scheduleExplosionBurstMerge(world);
+            scheduleExplosionBurstMerge(world, loc.getX() + 0.5, loc.getY() + 0.5, loc.getZ() + 0.5);
         }
     }
 
@@ -181,7 +209,7 @@ public final class SurgeExplosionGuard implements Listener {
      */
     public void tick(int brainStateCode) {
         long nowMs = System.currentTimeMillis();
-        rotateChunkLoadWindow(nowMs);
+        rotateChunkLoadWindow(System.nanoTime());
 
         int safeBrainState = Math.clamp(brainStateCode, BrainDirective.STATE_GREEN, BrainDirective.STATE_EMERGENCY);
         boolean surgeActive = lastChunkLoadsPerSec >= chunkLoadSurgeThreshold;
@@ -198,122 +226,165 @@ public final class SurgeExplosionGuard implements Listener {
             return;
         }
 
-        glidingScratch.clear();
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            if (player.isOnline()
-                && player.isValid()
-                && player.isGliding()
-                && !player.hasPermission(ELYTRA_BYPASS_PERMISSION)) {
-                glidingScratch.add(player);
+        // Y6: Evaluate gliding players per-world so chunk surges in one world do not unfairly clamp another world
+        int totalGliding = 0;
+        long totalRustNanos = 0L;
+        for (World world : Bukkit.getWorlds()) {
+            glidingScratch.clear();
+            for (Player player : world.getPlayers()) {
+                if (player.isOnline()
+                    && player.isValid()
+                    && player.isGliding()
+                    && !player.hasPermission(ELYTRA_BYPASS_PERMISSION)) {
+                    glidingScratch.add(player);
+                }
+            }
+
+            int count = glidingScratch.size();
+            if (count == 0) {
+                continue;
+            }
+            totalGliding += count;
+
+            int worldChunkRate = lastChunkLoadsByWorld.getOrDefault(world.getUID(), 0);
+            int worldEffState = (worldChunkRate >= chunkLoadSurgeThreshold)
+                ? Math.min(BrainDirective.STATE_EMERGENCY, safeBrainState + 1)
+                : safeBrainState;
+
+            surgeArena.ensureEntityCapacity(count);
+            for (int i = 0; i < count; i++) {
+                Player player = glidingScratch.get(i);
+                player.getLocation(scratchLoc);
+                Vector vel = player.getVelocity();
+
+                surgeArena.x.put(i, (float) scratchLoc.getX());
+                surgeArena.y.put(i, (float) scratchLoc.getY());
+                surgeArena.z.put(i, (float) scratchLoc.getZ());
+                surgeArena.setEntityVelocity(i, (float) vel.getX(), (float) vel.getY(), (float) vel.getZ());
+                surgeArena.flags.put(i, 1);
+            }
+
+            long rustStart = System.nanoTime();
+            int evalResult = api.evaluatePlayerSurges(surgeArena, count, worldEffState, baseMaxElytraSpeed);
+            totalRustNanos += (System.nanoTime() - rustStart);
+            if (evalResult < 0) {
+                continue;
+            }
+
+            for (int i = 0; i < count; i++) {
+                int action = surgeArena.outIntA.get(i);
+                if (action != RustNative.SURGE_CLAMP_VELOCITY) {
+                    continue;
+                }
+
+                float cvx = surgeArena.outX.get(i);
+                float cvy = surgeArena.outY.get(i);
+                float cvz = surgeArena.outZ.get(i);
+                if (!Float.isFinite(cvx) || !Float.isFinite(cvy) || !Float.isFinite(cvz)) {
+                    continue;
+                }
+
+                Player player = glidingScratch.get(i);
+                if (!player.isOnline() || !player.isValid()) {
+                    continue;
+                }
+
+                player.setVelocity(new Vector(cvx, cvy, cvz));
+                this.elytraClampsTotal++;
+
+                if (actionbarWarning) {
+                    UUID pid = player.getUniqueId();
+                    Long cooldownUntil = actionbarCooldownUntilMs.get(pid);
+                    if (cooldownUntil == null || cooldownUntil <= nowMs) {
+                        actionbarCooldownUntilMs.put(pid, nowMs + ACTIONBAR_COOLDOWN_MS);
+                        float clampedSpeed = (float) Math.sqrt(cvx * cvx + cvy * cvy + cvz * cvz);
+                        player.sendActionBar(Component.text(
+                            String.format(
+                                Locale.US,
+                                "Chunk yogunlugu nedeniyle Elytra hizi dengeleniyor (%.2f blok/tick)",
+                                clampedSpeed
+                            ),
+                            NamedTextColor.GOLD
+                        ));
+                    }
+                }
             }
         }
-
-        int count = glidingScratch.size();
-        this.lastGlidingPlayers = count;
-        if (count == 0) {
-            return;
-        }
-
+        glidingScratch.clear();
+        this.lastGlidingPlayers = totalGliding;
+        this.lastRustComputeNanos = totalRustNanos;
         if (!actionbarCooldownUntilMs.isEmpty()) {
             actionbarCooldownUntilMs.entrySet().removeIf(entry -> entry.getValue() <= nowMs);
         }
+    }
 
-        surgeArena.ensureEntityCapacity(count);
-        for (int i = 0; i < count; i++) {
-            Player player = glidingScratch.get(i);
-            player.getLocation(scratchLoc);
-            Vector vel = player.getVelocity();
-
-            surgeArena.x.put(i, (float) scratchLoc.getX());
-            surgeArena.y.put(i, (float) scratchLoc.getY());
-            surgeArena.z.put(i, (float) scratchLoc.getZ());
-            surgeArena.setEntityVelocity(i, (float) vel.getX(), (float) vel.getY(), (float) vel.getZ());
-            surgeArena.flags.put(i, 1);
-        }
-
-        long rustStart = System.nanoTime();
-        int evalResult = api.evaluatePlayerSurges(surgeArena, count, effectiveBrainState, baseMaxElytraSpeed);
-        this.lastRustComputeNanos = System.nanoTime() - rustStart;
-        if (evalResult < 0) {
-            return;
-        }
-
-        for (int i = 0; i < count; i++) {
-            int action = surgeArena.outIntA.get(i);
-            if (action != RustNative.SURGE_CLAMP_VELOCITY) {
-                continue;
+    private void rotateChunkLoadWindow(long nowNanos) {
+        long elapsedMs = (nowNanos - chunkWindowStartNanos) / 1_000_000L;
+        if (elapsedMs >= CHUNK_WINDOW_MS) {
+            double scale = 1_000.0 / Math.max(CHUNK_WINDOW_MS, elapsedMs);
+            this.lastChunkLoadsPerSec = (int) Math.round(chunkLoadsCurrentSec * scale);
+            this.lastChunkLoadsByWorld.clear();
+            for (Map.Entry<UUID, Integer> e : chunkLoadsByWorldCurrentSec.entrySet()) {
+                this.lastChunkLoadsByWorld.put(e.getKey(), (int) Math.round(e.getValue() * scale));
             }
-
-            float cvx = surgeArena.outX.get(i);
-            float cvy = surgeArena.outY.get(i);
-            float cvz = surgeArena.outZ.get(i);
-            if (!Float.isFinite(cvx) || !Float.isFinite(cvy) || !Float.isFinite(cvz)) {
-                continue;
+            this.chunkLoadsCurrentSec = 0;
+            this.chunkLoadsByWorldCurrentSec.clear();
+            this.chunkWindowStartNanos = nowNanos;
+        } else {
+            if (chunkLoadsCurrentSec > lastChunkLoadsPerSec) {
+                this.lastChunkLoadsPerSec = chunkLoadsCurrentSec;
             }
-
-            Player player = glidingScratch.get(i);
-            if (!player.isOnline() || !player.isValid()) {
-                continue;
-            }
-
-            player.setVelocity(new Vector(cvx, cvy, cvz));
-            this.elytraClampsTotal++;
-
-            if (actionbarWarning) {
-                UUID pid = player.getUniqueId();
-                Long cooldownUntil = actionbarCooldownUntilMs.get(pid);
-                if (cooldownUntil == null || cooldownUntil <= nowMs) {
-                    actionbarCooldownUntilMs.put(pid, nowMs + ACTIONBAR_COOLDOWN_MS);
-                    float clampedSpeed = (float) Math.sqrt(cvx * cvx + cvy * cvy + cvz * cvz);
-                    player.sendActionBar(Component.text(
-                        String.format(
-                            Locale.US,
-                            "Chunk yogunlugu nedeniyle Elytra hizi dengeleniyor (%.2f blok/tick)",
-                            clampedSpeed
-                        ),
-                        NamedTextColor.GOLD
-                    ));
+            for (Map.Entry<UUID, Integer> e : chunkLoadsByWorldCurrentSec.entrySet()) {
+                int cur = e.getValue();
+                if (cur > lastChunkLoadsByWorld.getOrDefault(e.getKey(), 0)) {
+                    lastChunkLoadsByWorld.put(e.getKey(), cur);
                 }
             }
         }
     }
 
-    private void rotateChunkLoadWindow(long nowMs) {
-        long elapsedMs = nowMs - chunkWindowStartMs;
-        if (elapsedMs >= CHUNK_WINDOW_MS) {
-            if (elapsedMs >= CHUNK_WINDOW_MS * 2L) {
-                this.lastChunkLoadsPerSec = (int) Math.round((chunkLoadsCurrentSec * 1_000.0) / elapsedMs);
-            } else {
-                this.lastChunkLoadsPerSec = chunkLoadsCurrentSec;
-            }
-            this.chunkLoadsCurrentSec = 0;
-            this.chunkWindowStartMs = nowMs;
-        } else if (chunkLoadsCurrentSec > lastChunkLoadsPerSec) {
-            this.lastChunkLoadsPerSec = chunkLoadsCurrentSec;
-        }
-    }
-
-    private void scheduleExplosionBurstMerge(World world) {
+    private void scheduleExplosionBurstMerge(World world, double x, double y, double z) {
         if (!plugin.isEnabled() || !api.isNativeLoaded()) {
             return;
         }
         UUID worldId = world.getUID();
-        if (!pendingExplosionWorlds.add(worldId)) {
+        List<ExplosionSpot> spots = pendingExplosionsByWorld.computeIfAbsent(worldId, k -> new ArrayList<>(4));
+        if (spots.size() < 32) {
+            spots.add(new ExplosionSpot(x, y, z));
+        }
+        if (pendingExplosionTasks.containsKey(worldId)) {
             return;
         }
-        Bukkit.getScheduler().runTaskLater(plugin, () -> processExplosionBurstMerge(worldId), 1L);
+        long capturedGen = this.resetGeneration;
+        BukkitTask task = Bukkit.getScheduler().runTaskLater(
+            plugin,
+            () -> processExplosionBurstMerge(worldId, capturedGen),
+            1L
+        );
+        pendingExplosionTasks.put(worldId, task);
     }
 
-    private void processExplosionBurstMerge(UUID worldId) {
-        pendingExplosionWorlds.remove(worldId);
+    private void processExplosionBurstMerge(UUID worldId, long expectedGen) {
+        if (expectedGen != this.resetGeneration) {
+            return;
+        }
+        pendingExplosionTasks.remove(worldId);
+        List<ExplosionSpot> spots = pendingExplosionsByWorld.remove(worldId);
 
         if (!enabled || !explosionEnabled || !api.isNativeLoaded()) {
+            return;
+        }
+        if (spots == null || spots.isEmpty()) {
             return;
         }
         World world = Bukkit.getWorld(worldId);
         if (world == null) {
             return;
         }
+
+        // Y5: Scope explosion item merge strictly to blast neighborhood so unrelated world items are untouched
+        double blastRadius = Math.max(12.0, explosionMergeRadius * 3.0);
+        double blastRadiusSq = blastRadius * blastRadius;
 
         Collection<Item> groundItems = world.getEntitiesByClass(Item.class);
         if (groundItems.size() < 2) {
@@ -322,101 +393,52 @@ public final class SurgeExplosionGuard implements Listener {
 
         itemScratch.clear();
         for (Item item : groundItems) {
-            if (!item.isValid() || item.isDead()) {
+            if (!SafeItemMergeHelper.isEligibleCandidate(item)) {
                 continue;
             }
-            if (item.getPickupDelay() >= INFINITE_PICKUP_DELAY_THRESHOLD) {
-                continue;
+            item.getLocation(scratchLoc);
+            if (isNearAnySpot(scratchLoc.getX(), scratchLoc.getY(), scratchLoc.getZ(), spots, blastRadiusSq)) {
+                itemScratch.add(item);
             }
-            ItemStack stack = item.getItemStack();
-            int maxStack = stack.getMaxStackSize();
-            int amount = stack.getAmount();
-            if (maxStack <= 1 || amount <= 0 || amount >= maxStack) {
-                continue;
-            }
-            itemScratch.add(item);
         }
 
-        int itemCount = itemScratch.size();
-        if (itemCount < 2) {
+        if (itemScratch.size() < 2) {
+            itemScratch.clear();
             return;
         }
 
         this.explosionBurstsBuffered++;
-
-        surgeArena.ensureEntityCapacity(itemCount);
-        for (int i = 0; i < itemCount; i++) {
-            Item item = itemScratch.get(i);
-            item.getLocation(scratchLoc);
-            ItemStack stack = item.getItemStack();
-            int typeBucket = (stack.getType().ordinal() << 1) | (stack.hasItemMeta() ? 1 : 0);
-            surgeArena.setItem(
-                i,
-                (float) scratchLoc.getX(),
-                (float) scratchLoc.getY(),
-                (float) scratchLoc.getZ(),
-                typeBucket,
-                stack.getAmount()
-            );
-        }
-
-        int maxPairs = Math.min(itemCount, MAX_EXPLOSION_MERGE_PAIRS);
-        int pairCount = api.planItemMerges(surgeArena, itemCount, 64, explosionMergeRadius, maxPairs);
-        if (pairCount <= 0) {
-            return;
-        }
-
-        long merged = 0L;
-        int clampedPairs = Math.min(pairCount, surgeArena.getEntityCapacity());
-        for (int p = 0; p < clampedPairs; p++) {
-            int targetIdx = surgeArena.outIntA.get(p);
-            int sourceIdx = surgeArena.outIntB.get(p);
-            if (targetIdx < 0 || targetIdx >= itemCount
-                || sourceIdx < 0 || sourceIdx >= itemCount
-                || targetIdx == sourceIdx) {
-                continue;
-            }
-
-            Item targetItem = itemScratch.get(targetIdx);
-            Item sourceItem = itemScratch.get(sourceIdx);
-            if (!targetItem.isValid() || !sourceItem.isValid()) {
-                continue;
-            }
-            if (targetItem.getPickupDelay() >= INFINITE_PICKUP_DELAY_THRESHOLD
-                || sourceItem.getPickupDelay() >= INFINITE_PICKUP_DELAY_THRESHOLD) {
-                continue;
-            }
-
-            ItemStack targetStack = targetItem.getItemStack();
-            ItemStack sourceStack = sourceItem.getItemStack();
-
-            // Critical NBT / enchantment / PDC safety gate before merging stacks
-            if (!targetStack.isSimilar(sourceStack)) {
-                continue;
-            }
-
-            int maxStackSize = targetStack.getMaxStackSize();
-            int freeSpace = maxStackSize - targetStack.getAmount();
-            int sourceAmount = sourceStack.getAmount();
-            if (freeSpace <= 0 || sourceAmount <= 0) {
-                continue;
-            }
-
-            int transfer = Math.min(freeSpace, sourceAmount);
-            targetStack.setAmount(targetStack.getAmount() + transfer);
-            targetItem.setItemStack(targetStack);
-
-            int remaining = sourceAmount - transfer;
-            if (remaining <= 0) {
-                sourceItem.remove();
-                merged++;
-            } else {
-                sourceStack.setAmount(remaining);
-                sourceItem.setItemStack(sourceStack);
-            }
-        }
-
+        long merged = SafeItemMergeHelper.planAndApplySafeMerges(
+            api,
+            surgeArena,
+            itemScratch,
+            explosionMergeRadius,
+            MAX_EXPLOSION_MERGE_PAIRS
+        );
+        itemScratch.clear();
         this.explosionItemsMergedTotal += merged;
+    }
+
+    private static boolean isNearAnySpot(
+        double x,
+        double y,
+        double z,
+        List<ExplosionSpot> spots,
+        double radiusSq
+    ) {
+        for (int i = 0; i < spots.size(); i++) {
+            ExplosionSpot s = spots.get(i);
+            double dx = x - s.x;
+            double dy = y - s.y;
+            double dz = z - s.z;
+            if (dx * dx + dy * dy + dz * dz <= radiusSq) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private record ExplosionSpot(double x, double y, double z) {
     }
 
     private static float computeSpeedCapForState(int stateCode, float baseMaxSpeed) {

@@ -408,6 +408,24 @@ impl BrainState {
         self.uptime_secs = self.started_at.elapsed().as_secs();
     }
 
+    /// Returns true if `conn_id` is currently the active authenticated IPC session.
+    pub fn is_active_connection(&self, conn_id: u64) -> bool {
+        self.connected && self.active_conn_id != 0 && self.active_conn_id == conn_id
+    }
+
+    /// Y7: Session-verified telemetry ingest — rejects telemetry from superseded/stale IPC
+    /// connections so an older session can never overwrite active Brain state.
+    pub fn ingest_telemetry_for(
+        &mut self,
+        conn_id: u64,
+        telemetry: &TelemetryPayload,
+    ) -> Option<BrainDirective> {
+        if !self.connected || self.active_conn_id == 0 || self.active_conn_id != conn_id {
+            return None;
+        }
+        Some(self.ingest_telemetry(telemetry))
+    }
+
     /// Evaluates incoming Purpur telemetry using EWMA (alpha = 0.25) and 2-tick recovery hysteresis,
     /// updates internal state, and returns the resulting `BrainDirective`.
     pub fn ingest_telemetry(&mut self, telemetry: &TelemetryPayload) -> BrainDirective {

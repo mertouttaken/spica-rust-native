@@ -600,8 +600,9 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage(Component.text(
             String.format(
                 Locale.US,
-                "Durum: %s | Rust Hesaplama: %.3f ms (Toplam: %.3f ms) | Oyuncu Koruma: %s | Lockdown Uyari: %s",
+                "Durum: %s (%s) | Rust Hesaplama: %.3f ms (Toplam: %.3f ms) | Oyuncu Koruma: %s | Lockdown Uyari: %s",
                 redstone.isEnabled() ? "AKTIF" : "KAPALI",
+                redstone.isMonitorOnly() ? "IZLEME" : "FRENLEME",
                 redstone.getLastRustMs(),
                 redstone.getLastTotalMs(),
                 redstone.isProtectPlayerTriggers() ? "AKTIF" : "KAPALI",

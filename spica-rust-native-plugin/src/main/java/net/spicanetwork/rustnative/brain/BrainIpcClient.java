@@ -4,15 +4,22 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
-import java.io.BufferedReader;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.io.BufferedInputStream;
 import java.io.BufferedWriter;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.InputStream;
 import java.io.OutputStreamWriter;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.util.HexFormat;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
@@ -22,9 +29,14 @@ import java.util.logging.Logger;
  * {@code spica-launcher} Rust Brain daemon.
  *
  * Guarantees:
- * - Never blocks the Minecraft Main Thread (single-slot {@link AtomicReference} telemetry handoff)
- * - Bounded memory (at most 1 pending telemetry JSON string in flight)
- * - Automatic reconnect every 5 seconds if {@code spica-launcher} restarts or starts later
+ * - Never blocks the Minecraft Main Thread (single-slot {@link AtomicReference} telemetry handoff,
+ *   non-blocking {@link #shutdown()})
+ * - Bounded memory and wall-clock framing (64 KiB max line length, 5s Slowloris frame deadline,
+ *   partial-frame preservation across {@code SO_TIMEOUT} polls)
+ * - Mutual cryptographic authentication: reads token from {@code SPICA_IPC_TOKEN} env var (fallback
+ *   {@code -Dspica.ipc.token}), sends a fresh CSPRNG {@code nonce}, and verifies the launcher's
+ *   HMAC-SHA256 {@code proof} in {@code hello_ack} in constant time before accepting directives
+ * - Automatic reconnect every 5 seconds or immediately on stale directives
  */
 public final class BrainIpcClient {
 
@@ -33,6 +45,9 @@ public final class BrainIpcClient {
 
     private static final int CONNECT_TIMEOUT_MS = 3_000;
     private static final int READ_TIMEOUT_MS = 150;
+    private static final int HANDSHAKE_ACK_TIMEOUT_MS = 5_000;
+    private static final long FRAME_READ_DEADLINE_NANOS = 5_000_000_000L;
+    private static final int MAX_INCOMING_LINE_BYTES = 64 * 1024;
     private static final long RECONNECT_DELAY_MS = 5_000L;
 
     private final String host;
@@ -40,6 +55,7 @@ public final class BrainIpcClient {
     private final String token;
     private final boolean enabled;
     private final Logger logger;
+    private final SecureRandom secureRandom = new SecureRandom();
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean connected = new AtomicBoolean(false);
@@ -55,9 +71,9 @@ public final class BrainIpcClient {
 
         String propHost = System.getProperty("spica.ipc.host");
         if (propHost != null && !propHost.isBlank()) {
-            this.host = propHost.trim();
+            this.host = normalizeHost(propHost);
         } else if (fallbackHost != null && !fallbackHost.isBlank()) {
-            this.host = fallbackHost.trim();
+            this.host = normalizeHost(fallbackHost);
         } else {
             this.host = "127.0.0.1";
         }
@@ -76,10 +92,25 @@ public final class BrainIpcClient {
         }
         this.port = (resolvedPort > 0 && resolvedPort <= 65535) ? resolvedPort : 0;
 
-        String propToken = System.getProperty("spica.ipc.token");
-        this.token = propToken != null ? propToken.trim() : "";
+        // Y7: Prefer process environment variable (not exposed in /proc/<pid>/cmdline or ps/WMI);
+        // keep -Dspica.ipc.token only as backwards-compatible standalone fallback.
+        String envToken = System.getenv("SPICA_IPC_TOKEN");
+        if (envToken != null && !envToken.isBlank()) {
+            this.token = envToken.trim();
+        } else {
+            String propToken = System.getProperty("spica.ipc.token");
+            this.token = propToken != null ? propToken.trim() : "";
+        }
 
         this.enabled = this.port > 0;
+    }
+
+    private static String normalizeHost(String raw) {
+        String trimmed = raw.trim();
+        if (trimmed.startsWith("[") && trimmed.endsWith("]") && trimmed.length() >= 2) {
+            return trimmed.substring(1, trimmed.length() - 1);
+        }
+        return trimmed;
     }
 
     public synchronized void start() {
@@ -98,9 +129,6 @@ public final class BrainIpcClient {
         logger.info("[SpicaRustNative] Launcher IPC istemcisi baslatildi -> " + host + ":" + port);
     }
 
-    /**
-     * Non-blocking single-slot telemetry submission safe to invoke directly from the Main Thread.
-     */
     public void submitTelemetry(
         double mspt,
         double tps,
@@ -114,9 +142,6 @@ public final class BrainIpcClient {
         submitTelemetry(mspt, tps, entities, hibernated, players, loadedChunks, heapUsedMb, heapMaxMb, 0, 0);
     }
 
-    /**
-     * Non-blocking single-slot telemetry submission including Farm & Villager Governor metrics.
-     */
     public void submitTelemetry(
         double mspt,
         double tps,
@@ -135,10 +160,6 @@ public final class BrainIpcClient {
         );
     }
 
-    /**
-     * Non-blocking single-slot telemetry submission including Farm & Villager Governor and
-     * Elytra / Explosion Surge Guard metrics.
-     */
     public void submitTelemetry(
         double mspt,
         double tps,
@@ -159,10 +180,6 @@ public final class BrainIpcClient {
         );
     }
 
-    /**
-     * Non-blocking single-slot telemetry submission including Farm & Villager Governor,
-     * Elytra / Explosion Surge Guard, and Mob Visibility & Tracking Optimizer metrics.
-     */
     public void submitTelemetry(
         double mspt,
         double tps,
@@ -186,11 +203,6 @@ public final class BrainIpcClient {
         );
     }
 
-    /**
-     * Non-blocking single-slot telemetry submission including Farm & Villager Governor,
-     * Elytra / Explosion Surge Guard, Mob Visibility & Tracking Optimizer, and
-     * Redstone & Hopper Lag-Machine Governor metrics.
-     */
     public void submitTelemetry(
         double mspt,
         double tps,
@@ -255,6 +267,17 @@ public final class BrainIpcClient {
         return lastDirectiveTimestampMs;
     }
 
+    public void forceReconnect() {
+        connected.set(false);
+        latestDirective.set(null);
+        lastDirectiveTimestampMs = 0L;
+        Socket socket = activeSocket.getAndSet(null);
+        closeQuietly(socket);
+    }
+
+    /**
+     * Non-blocking shutdown safe to invoke on the Bukkit Main Thread during {@code onDisable()} / reload.
+     */
     public synchronized void shutdown() {
         running.set(false);
         connected.set(false);
@@ -268,11 +291,6 @@ public final class BrainIpcClient {
         this.workerThread = null;
         if (thread != null) {
             thread.interrupt();
-            try {
-                thread.join(500L);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            }
         }
     }
 
@@ -286,18 +304,27 @@ public final class BrainIpcClient {
                 activeSocket.set(socket);
                 socket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
                 socket.setTcpNoDelay(true);
-                socket.setSoTimeout(READ_TIMEOUT_MS);
+                socket.setSoTimeout(HANDSHAKE_ACK_TIMEOUT_MS);
 
                 BufferedWriter writer = new BufferedWriter(
                     new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)
                 );
-                BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8)
-                );
+                InputStream in = new BufferedInputStream(socket.getInputStream(), 4096);
+                FrameReader frameReader = new FrameReader(MAX_INCOMING_LINE_BYTES);
 
-                sendHandshake(writer);
+                String nonce = generateNonceHex();
+                sendHandshake(writer, nonce);
 
+                // Y7: Wait for mutually-authenticated HMAC-SHA256 hello_ack within strict wall-clock deadline
+                long ackDeadline = System.nanoTime() + (HANDSHAKE_ACK_TIMEOUT_MS * 1_000_000L);
+                String ackLine = frameReader.readNextLine(in, ackDeadline);
+                if (ackLine == null || !verifyHelloAck(ackLine, nonce, token)) {
+                    throw new IOException("spica-launcher hello_ack HMAC dogrulamasi basarisiz oldu");
+                }
+
+                socket.setSoTimeout(READ_TIMEOUT_MS);
                 connected.set(true);
+                lastDirectiveTimestampMs = System.currentTimeMillis();
                 loggedConnectFailure = false;
                 logger.info("[SpicaRustNative] spica-launcher Brain IPC baglantisi kuruldu (" + host + ":" + port + ")");
 
@@ -310,15 +337,18 @@ public final class BrainIpcClient {
                     }
 
                     try {
-                        String line = reader.readLine();
-                        if (line == null) {
+                        String line = frameReader.pollLine(in, FRAME_READ_DEADLINE_NANOS);
+                        if (line == FrameReader.EOF) {
                             break;
                         }
-                        if (!line.isBlank()) {
+                        if (line != null && !line.isBlank()) {
                             handleIncomingLine(line);
                         }
                     } catch (SocketTimeoutException ignored) {
-                        // Normal non-blocking poll timeout; loop back to flush pending telemetry
+                        // Partial frame bytes are preserved inside frameReader; check wall-clock deadline
+                        if (frameReader.isPartialFrameExpired(FRAME_READ_DEADLINE_NANOS)) {
+                            throw new IOException("IPC frame read deadline exceeded (slow peer)");
+                        }
                     }
                 }
             } catch (IOException ex) {
@@ -354,10 +384,131 @@ public final class BrainIpcClient {
         }
     }
 
-    private void sendHandshake(BufferedWriter writer) throws IOException {
+    /**
+     * Y8: Stateful bounded NDJSON line reader that preserves partial frames across {@code SO_TIMEOUT}
+     * polls and enforces strict wall-clock deadlines against slowloris peers.
+     */
+    private static final class FrameReader {
+        static final String EOF = new String();
+        private final int maxBytes;
+        private final ByteArrayOutputStream buf = new ByteArrayOutputStream(512);
+        private long partialStartNanos = 0L;
+
+        FrameReader(int maxBytes) {
+            this.maxBytes = maxBytes;
+        }
+
+        String readNextLine(InputStream in, long deadlineNanos) throws IOException {
+            while (true) {
+                if (System.nanoTime() > deadlineNanos) {
+                    throw new IOException("IPC handshake/frame wall-clock deadline exceeded");
+                }
+                int b = in.read();
+                if (b < 0) {
+                    if (buf.size() == 0) {
+                        return null;
+                    }
+                    return flushLine();
+                }
+                if (b == '\n') {
+                    return flushLine();
+                }
+                if (b != '\r') {
+                    appendByte(b);
+                }
+            }
+        }
+
+        String pollLine(InputStream in, long maxFrameNanos) throws IOException {
+            while (true) {
+                if (partialStartNanos != 0L && (System.nanoTime() - partialStartNanos) > maxFrameNanos) {
+                    throw new IOException("IPC partial frame deadline exceeded");
+                }
+                int b = in.read();
+                if (b < 0) {
+                    if (buf.size() == 0) {
+                        return EOF;
+                    }
+                    return flushLine();
+                }
+                if (partialStartNanos == 0L) {
+                    partialStartNanos = System.nanoTime();
+                }
+                if (b == '\n') {
+                    return flushLine();
+                }
+                if (b != '\r') {
+                    appendByte(b);
+                }
+            }
+        }
+
+        boolean isPartialFrameExpired(long maxFrameNanos) {
+            return partialStartNanos != 0L && (System.nanoTime() - partialStartNanos) > maxFrameNanos;
+        }
+
+        private void appendByte(int b) throws IOException {
+            if (buf.size() >= maxBytes) {
+                throw new IOException("IPC frame exceeds max allowed size (" + maxBytes + " bytes)");
+            }
+            buf.write(b);
+        }
+
+        private String flushLine() {
+            String result = buf.toString(StandardCharsets.UTF_8);
+            buf.reset();
+            partialStartNanos = 0L;
+            return result;
+        }
+    }
+
+    private String generateNonceHex() {
+        byte[] bytes = new byte[16];
+        secureRandom.nextBytes(bytes);
+        return HexFormat.of().formatHex(bytes);
+    }
+
+    private static boolean verifyHelloAck(String line, String nonce, String expectedToken) {
+        if (expectedToken == null || expectedToken.isEmpty() || nonce == null || nonce.isEmpty()) {
+            return false;
+        }
+        try {
+            JsonElement parsed = JsonParser.parseString(line.trim());
+            if (!parsed.isJsonObject()) {
+                return false;
+            }
+            JsonObject obj = parsed.getAsJsonObject();
+            if (!"hello_ack".equalsIgnoreCase(getString(obj, "type", ""))
+                || !"ok".equalsIgnoreCase(getString(obj, "status", ""))) {
+                return false;
+            }
+            long connId = getLong(obj, "connId", 0L);
+            String proof = getString(obj, "proof", "");
+            if (connId <= 0L || proof.isEmpty()) {
+                return false;
+            }
+            String expectedProof = computeHmacSha256Hex(expectedToken, "spica-ipc-v1:" + nonce + ":" + connId);
+            return MessageDigest.isEqual(
+                proof.getBytes(StandardCharsets.UTF_8),
+                expectedProof.getBytes(StandardCharsets.UTF_8)
+            );
+        } catch (RuntimeException | GeneralSecurityException ex) {
+            return false;
+        }
+    }
+
+    private static String computeHmacSha256Hex(String secretKey, String message) throws GeneralSecurityException {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(secretKey.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        byte[] digest = mac.doFinal(message.getBytes(StandardCharsets.UTF_8));
+        return HexFormat.of().formatHex(digest);
+    }
+
+    private void sendHandshake(BufferedWriter writer, String nonce) throws IOException {
         JsonObject hello = new JsonObject();
         hello.addProperty("type", "hello");
         hello.addProperty("token", token);
+        hello.addProperty("nonce", nonce);
         hello.addProperty("server", SERVER_FLAVOR);
         hello.addProperty("pluginVersion", PLUGIN_VERSION);
 
@@ -438,6 +589,17 @@ public final class BrainIpcClient {
         }
         try {
             return obj.get(key).getAsInt();
+        } catch (RuntimeException ignored) {
+            return fallback;
+        }
+    }
+
+    private static long getLong(JsonObject obj, String key, long fallback) {
+        if (!hasPrimitive(obj, key)) {
+            return fallback;
+        }
+        try {
+            return obj.get(key).getAsLong();
         } catch (RuntimeException ignored) {
             return fallback;
         }

@@ -243,9 +243,10 @@ pub fn compute_mob_tracking(
                     d2
                 };
 
-                // Safety near zone: exempt from cave/vertical and rear-FOV culling, highest non-immune priority.
+                // Safety near zone (Y1): exempt from cave/vertical, rear-FOV, AND Top-K budget culling
+                // so nearby threats/mobs are NEVER hidden even inside dense farms or boss arenas.
                 if d2 <= safe_near_sq {
-                    candidates.push((SAFETY_NEAR_SCORE_BIAS + base_score, mi, false));
+                    candidates.push((SAFETY_NEAR_SCORE_BIAS + base_score, mi, true));
                     continue;
                 }
 
@@ -361,7 +362,8 @@ pub fn compute_mob_tracking(
         }
     };
 
-    // Sequential merge: mutate `hidden_bitset` ONLY for deltas that fit within `max_deltas`.
+    // Sequential merge (Y1): ALWAYS emit TRACK_ACTION_SHOW deltas BEFORE TRACK_ACTION_HIDE deltas
+    // so revealing nearby/approaching mobs is never starved behind hiding distant mobs under backpressure.
     let max_deltas = out_delta_player_idx
         .len()
         .min(out_delta_mob_idx.len())
@@ -372,40 +374,63 @@ pub fn compute_mob_tracking(
     let mut total_visible = 0i32;
     let mut total_culled_by_budget = 0i32;
 
-    for (pi, res) in per_player_results.into_iter().enumerate() {
-        let base_bit = pi * m;
-        let mut player_hidden = res.hidden_count;
-        let mut player_visible = res.visible_count;
+    let mut player_hidden_counts: Vec<i32> = per_player_results
+        .iter()
+        .map(|r| r.hidden_count)
+        .collect();
+    let mut player_visible_counts: Vec<i32> = per_player_results
+        .iter()
+        .map(|r| r.visible_count)
+        .collect();
+    for res in &per_player_results {
         total_culled_by_budget = total_culled_by_budget.saturating_add(res.culled_by_budget);
+    }
 
-        for (mi, action) in res.deltas {
+    // Pass 1: Emit all SHOW transitions first across all players
+    for (pi, res) in per_player_results.iter().enumerate() {
+        let base_bit = pi * m;
+        for &(mi, action) in &res.deltas {
+            if action != TRACK_ACTION_SHOW {
+                continue;
+            }
             if deltas_written < max_deltas {
                 let bit = base_bit + mi;
-                let byte_idx = bit >> 3;
-                let mask = 1u8 << (bit & 7);
-                if action == TRACK_ACTION_HIDE {
-                    hidden_bitset[byte_idx] |= mask;
-                } else {
-                    hidden_bitset[byte_idx] &= !mask;
-                }
+                hidden_bitset[bit >> 3] &= !(1u8 << (bit & 7));
                 out_delta_player_idx[deltas_written] = pi as i32;
                 out_delta_mob_idx[deltas_written] = mi as i32;
-                out_delta_action[deltas_written] = action;
+                out_delta_action[deltas_written] = TRACK_ACTION_SHOW;
                 deltas_written += 1;
             } else {
-                // Leave bit untouched so Java & Rust remain synchronized on the next tick.
-                if action == TRACK_ACTION_HIDE {
-                    player_hidden -= 1;
-                    player_visible += 1;
-                } else {
-                    player_visible -= 1;
-                    player_hidden += 1;
-                }
+                player_visible_counts[pi] -= 1;
+                player_hidden_counts[pi] += 1;
             }
         }
+    }
 
-        total_hidden = total_hidden.saturating_add(player_hidden);
-        total_visible = total_visible.saturating_add(player_visible);
+    // Pass 2: Emit HIDE transitions with remaining delta budget
+    for (pi, res) in per_player_results.iter().enumerate() {
+        let base_bit = pi * m;
+        for &(mi, action) in &res.deltas {
+            if action != TRACK_ACTION_HIDE {
+                continue;
+            }
+            if deltas_written < max_deltas {
+                let bit = base_bit + mi;
+                hidden_bitset[bit >> 3] |= 1u8 << (bit & 7);
+                out_delta_player_idx[deltas_written] = pi as i32;
+                out_delta_mob_idx[deltas_written] = mi as i32;
+                out_delta_action[deltas_written] = TRACK_ACTION_HIDE;
+                deltas_written += 1;
+            } else {
+                player_hidden_counts[pi] -= 1;
+                player_visible_counts[pi] += 1;
+            }
+        }
+    }
+
+    for pi in 0..player_hidden_counts.len() {
+        total_hidden = total_hidden.saturating_add(player_hidden_counts[pi]);
+        total_visible = total_visible.saturating_add(player_visible_counts[pi]);
     }
 
     let deltas_i32 = deltas_written.min(i32::MAX as usize) as i32;
@@ -630,6 +655,74 @@ mod tests {
         }
         for mi in 10..90 {
             assert!(is_bit_hidden(&bitset, 100, 0, mi));
+        }
+    }
+
+    #[test]
+    fn test_safety_near_exempt_from_top_k_and_show_prioritized_over_hide() {
+        // 12 ALWAYS_VISIBLE bosses + 4 ordinary mobs inside safety_near_range (x=5..8)
+        // with max_mobs_per_player = 8 -> even though bosses alone exceed budget (12 > 8),
+        // ALL 4 safety-near mobs MUST remain visible (Y1).
+        let mut mob_xs = vec![20.0f32; 12];
+        mob_xs.extend_from_slice(&[5.0, 6.0, 7.0, 8.0, 60.0, 61.0, 62.0, 63.0]);
+        let mob_ys = vec![64.0f32; 20];
+        let mob_zs = vec![0.0f32; 20];
+        let mut mob_flags = vec![TRACK_FLAG_ALWAYS_VISIBLE; 12];
+        mob_flags.extend_from_slice(&[TRACK_FLAG_HOSTILE; 4]); // indices 12..16: safety-near
+        mob_flags.extend_from_slice(&[TRACK_FLAG_PASSIVE; 4]); // indices 16..20: out of range (to HIDE)
+
+        let pxs = [0.0f32];
+        let pys = [64.0f32];
+        let pzs = [0.0f32];
+        let plx = [1.0f32];
+        let ply = [0.0f32];
+        let plz = [0.0f32];
+
+        // Pretend safety-near mobs (12..16) were previously hidden (bits set to 1) while out-of-range (16..20) were visible (0)
+        let mut bitset = vec![0u8; 3];
+        for mi in 12..16 {
+            bitset[mi >> 3] |= 1u8 << (mi & 7);
+        }
+
+        // Tight max_deltas = 5 (4 SHOWs + 4 HIDEs wanted -> all 4 SHOWs MUST come first!)
+        let mut dp = [0i32; 5];
+        let mut dm = [0i32; 5];
+        let mut da = [0i32; 5];
+        let mut stats = [0i32; 4];
+
+        let written = compute_mob_tracking(
+            &mob_xs,
+            &mob_ys,
+            &mob_zs,
+            &mob_flags,
+            &pxs,
+            &pys,
+            &pzs,
+            &plx,
+            &ply,
+            &plz,
+            48.0,
+            12.0,
+            24.0,
+            16.0,
+            -0.25,
+            8, // budget smaller than 12 bosses
+            0,
+            &mut bitset,
+            &mut dp,
+            &mut dm,
+            &mut da,
+            &mut stats,
+        );
+
+        assert_eq!(written, 5);
+        // First 4 deltas MUST be TRACK_ACTION_SHOW for safety-near mobs 12..16
+        for k in 0..4 {
+            assert_eq!(da[k], TRACK_ACTION_SHOW, "delta {k} must prioritize SHOW over HIDE");
+        }
+        assert_eq!(da[4], TRACK_ACTION_HIDE);
+        for mi in 12..16 {
+            assert!(!is_bit_hidden(&bitset, 20, 0, mi), "safety-near mob {mi} must be visible");
         }
     }
 

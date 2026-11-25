@@ -4,6 +4,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Reusable off-heap Structure-of-Arrays (SoA) memory arena for zero-copy Rust FFI calls.
@@ -11,14 +12,18 @@ import java.nio.IntBuffer;
  * Guarantees:
  * - Zero JVM heap allocations per tick once warmed up
  * - Native CPU endianness (`ByteOrder.nativeOrder()`) so Rust reads raw f32/i32 slices directly
- * - Thread-confined usage: keep one arena per thread (e.g. one for Main Thread, one for async tasks)
+ * - Exclusive call lease (`acquireNativeLease()`) preventing concurrent JNI calls or buffer
+ *   resizing while Rust holds raw pointers into this arena
  */
 public final class EntityBatchArena {
 
     public static final int MAX_HOT_CHUNKS = 128;
     public static final int GOV_INT_SLOTS = 4;
     public static final int GOV_FLOAT_SLOTS = 4;
+    private static final int MAX_CAPACITY_ELEMENTS = Integer.MAX_VALUE / Float.BYTES;
 
+    private final ReentrantLock nativeLeaseLock = new ReentrantLock();
+    private volatile boolean inNativeCall = false;
     private int entityCapacity;
     private int targetCapacity;
 
@@ -63,26 +68,93 @@ public final class EntityBatchArena {
         allocateBrainAuxBuffers();
     }
 
+    /**
+     * Acquires an exclusive ownership lease on this arena for the duration of a single native
+     * Rust FFI invocation. Prevents concurrent JNI calls or buffer reallocation while Rust
+     * reads/writes off-heap memory.
+     */
+    public NativeLease acquireNativeLease() {
+        nativeLeaseLock.lock();
+        if (inNativeCall) {
+            nativeLeaseLock.unlock();
+            throw new IllegalStateException("Reentrant native FFI call on the same EntityBatchArena is forbidden.");
+        }
+        inNativeCall = true;
+        return new NativeLease(this);
+    }
+
+    private void releaseNativeLease() {
+        inNativeCall = false;
+        nativeLeaseLock.unlock();
+    }
+
+    public static final class NativeLease implements AutoCloseable {
+        private final EntityBatchArena arena;
+        private boolean closed = false;
+
+        private NativeLease(EntityBatchArena arena) {
+            this.arena = arena;
+        }
+
+        @Override
+        public void close() {
+            if (!closed) {
+                closed = true;
+                arena.releaseNativeLease();
+            }
+        }
+    }
+
     public void ensureEntityCapacity(int needed) {
-        if (needed <= entityCapacity) {
-            return;
+        if (needed > MAX_CAPACITY_ELEMENTS) {
+            throw new IllegalArgumentException("Requested entity capacity exceeds direct ByteBuffer limits: " + needed);
         }
-        int next = entityCapacity;
-        while (next < needed) {
-            next = Math.max(next * 2, needed);
+        nativeLeaseLock.lock();
+        try {
+            if (inNativeCall) {
+                throw new IllegalStateException("Cannot resize EntityBatchArena while a native Rust call is active.");
+            }
+            if (needed <= entityCapacity) {
+                return;
+            }
+            int next = entityCapacity;
+            while (next < needed) {
+                if (next >= MAX_CAPACITY_ELEMENTS / 2) {
+                    next = needed;
+                    break;
+                }
+                next = Math.max(next * 2, needed);
+            }
+            allocateEntityBuffers(next);
+        } finally {
+            nativeLeaseLock.unlock();
         }
-        allocateEntityBuffers(next);
     }
 
     public void ensureTargetCapacity(int needed) {
-        if (needed <= targetCapacity) {
-            return;
+        if (needed > MAX_CAPACITY_ELEMENTS) {
+            throw new IllegalArgumentException("Requested target capacity exceeds direct ByteBuffer limits: " + needed);
         }
-        int next = targetCapacity;
-        while (next < needed) {
-            next = Math.max(next * 2, needed);
+        nativeLeaseLock.lock();
+        try {
+            if (inNativeCall) {
+                throw new IllegalStateException("Cannot resize EntityBatchArena while a native Rust call is active.");
+            }
+            if (needed <= targetCapacity) {
+                return;
+            }
+            int next = targetCapacity;
+            while (next < needed) {
+                if (next >= MAX_CAPACITY_ELEMENTS / 2) {
+                    next = needed;
+                    break;
+                }
+                next = Math.max(next * 2, needed);
+            }
+            allocateTargetBuffers(next);
+        } finally {
+            nativeLeaseLock.unlock();
         }
-        allocateTargetBuffers(next);
     }
 
     public int getEntityCapacity() {
@@ -128,27 +200,48 @@ public final class EntityBatchArena {
     }
 
     private void allocateEntityBuffers(int cap) {
-        this.entityCapacity = cap;
+        if (cap <= 0 || cap > MAX_CAPACITY_ELEMENTS) {
+            throw new IllegalArgumentException("Invalid entity arena capacity: " + cap);
+        }
         int floatBytes = cap * Float.BYTES;
         int intBytes = cap * Integer.BYTES;
 
-        this.xBuf = allocNative(floatBytes);
-        this.yBuf = allocNative(floatBytes);
-        this.zBuf = allocNative(floatBytes);
-        this.vxBuf = allocNative(floatBytes);
-        this.vyBuf = allocNative(floatBytes);
-        this.vzBuf = allocNative(floatBytes);
-        this.radiusBuf = allocNative(floatBytes);
-        this.typeIdBuf = allocNative(intBytes);
-        this.amountBuf = allocNative(intBytes);
-        this.flagsBuf = allocNative(intBytes);
+        // Allocate all buffers first so a DirectBuffer OOM never leaves entityCapacity/fields half-updated
+        ByteBuffer newXBuf = allocNative(floatBytes);
+        ByteBuffer newYBuf = allocNative(floatBytes);
+        ByteBuffer newZBuf = allocNative(floatBytes);
+        ByteBuffer newVxBuf = allocNative(floatBytes);
+        ByteBuffer newVyBuf = allocNative(floatBytes);
+        ByteBuffer newVzBuf = allocNative(floatBytes);
+        ByteBuffer newRadiusBuf = allocNative(floatBytes);
+        ByteBuffer newTypeIdBuf = allocNative(intBytes);
+        ByteBuffer newAmountBuf = allocNative(intBytes);
+        ByteBuffer newFlagsBuf = allocNative(intBytes);
 
-        this.outXBuf = allocNative(floatBytes);
-        this.outYBuf = allocNative(floatBytes);
-        this.outZBuf = allocNative(floatBytes);
-        this.outDistSqBuf = allocNative(floatBytes);
-        this.outIntABuf = allocNative(intBytes);
-        this.outIntBBuf = allocNative(intBytes);
+        ByteBuffer newOutXBuf = allocNative(floatBytes);
+        ByteBuffer newOutYBuf = allocNative(floatBytes);
+        ByteBuffer newOutZBuf = allocNative(floatBytes);
+        ByteBuffer newOutDistSqBuf = allocNative(floatBytes);
+        ByteBuffer newOutIntABuf = allocNative(intBytes);
+        ByteBuffer newOutIntBBuf = allocNative(intBytes);
+
+        this.xBuf = newXBuf;
+        this.yBuf = newYBuf;
+        this.zBuf = newZBuf;
+        this.vxBuf = newVxBuf;
+        this.vyBuf = newVyBuf;
+        this.vzBuf = newVzBuf;
+        this.radiusBuf = newRadiusBuf;
+        this.typeIdBuf = newTypeIdBuf;
+        this.amountBuf = newAmountBuf;
+        this.flagsBuf = newFlagsBuf;
+
+        this.outXBuf = newOutXBuf;
+        this.outYBuf = newOutYBuf;
+        this.outZBuf = newOutZBuf;
+        this.outDistSqBuf = newOutDistSqBuf;
+        this.outIntABuf = newOutIntABuf;
+        this.outIntBBuf = newOutIntBBuf;
 
         this.x = xBuf.asFloatBuffer();
         this.y = yBuf.asFloatBuffer();
@@ -167,19 +260,27 @@ public final class EntityBatchArena {
         this.outDistSq = outDistSqBuf.asFloatBuffer();
         this.outIntA = outIntABuf.asIntBuffer();
         this.outIntB = outIntBBuf.asIntBuffer();
+        this.entityCapacity = cap;
     }
 
     private void allocateTargetBuffers(int cap) {
-        this.targetCapacity = cap;
+        if (cap <= 0 || cap > MAX_CAPACITY_ELEMENTS) {
+            throw new IllegalArgumentException("Invalid target arena capacity: " + cap);
+        }
         int bytes = cap * Float.BYTES;
 
-        this.targetXBuf = allocNative(bytes);
-        this.targetYBuf = allocNative(bytes);
-        this.targetZBuf = allocNative(bytes);
+        ByteBuffer newTargetXBuf = allocNative(bytes);
+        ByteBuffer newTargetYBuf = allocNative(bytes);
+        ByteBuffer newTargetZBuf = allocNative(bytes);
+
+        this.targetXBuf = newTargetXBuf;
+        this.targetYBuf = newTargetYBuf;
+        this.targetZBuf = newTargetZBuf;
 
         this.targetX = targetXBuf.asFloatBuffer();
         this.targetY = targetYBuf.asFloatBuffer();
         this.targetZ = targetZBuf.asFloatBuffer();
+        this.targetCapacity = cap;
     }
 
     private void allocateBrainAuxBuffers() {

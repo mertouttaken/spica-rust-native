@@ -2,76 +2,86 @@
 //!
 //! Uses `GetDirectBufferAddress` to read/write off-heap `ByteBuffer.allocateDirect(...)`
 //! memory directly with zero copying and zero GC allocation per tick.
+//!
+//! Safety guarantees (K1):
+//! - Every `JByteBuffer` is validated via `SpanValidator` BEFORE any Rust slice is formed:
+//!   direct address non-null, `align_of::<T>()`, `count * size_of::<T>() <= isize::MAX`,
+//!   capacity >= needed bytes, address wraparound check, `isReadOnly()` rejection on outputs,
+//!   and strict rejection of read-write / write-write overlapping DirectByteBuffer views.
+//! - Every exported function wraps its entire body (including JNI return allocation) in
+//!   `catch_unwind`.
 
-use std::mem::{align_of, size_of};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::slice;
 
-use jni::objects::{JByteBuffer, JClass};
+use jni::objects::{JByteBuffer, JClass, JObject};
 use jni::sys::{jfloat, jint, jlong, jstring};
 use jni::JNIEnv;
 
+use crate::ffi_guard::{FfiGuardError, RawReadSpan, RawWriteSpan, SpanValidator};
 use crate::{
     block_diff, farm_governor, flowfield, governor, heatmap, kernels, mob_tracker, noise,
     redstone_guard, surge_guard,
 };
 
-/// Safely view a Java DirectByteBuffer as an immutable slice `&[T]`.
-unsafe fn buf_as_slice<'a, T>(
+/// Inspects a Java DirectByteBuffer and registers it as a read-only span in `validator`.
+fn register_jni_read<T>(
     env: &mut JNIEnv<'_>,
+    validator: &mut SpanValidator,
     buf: &JByteBuffer<'_>,
     count: usize,
-) -> Result<&'a [T], &'static str> {
+) -> Result<RawReadSpan<T>, FfiGuardError> {
     if count == 0 {
-        return Ok(&[]);
+        return Ok(RawReadSpan::empty());
+    }
+    if buf.is_null() {
+        return Err(FfiGuardError::NullPointer);
     }
     let ptr = env
         .get_direct_buffer_address(buf)
-        .map_err(|_| "not a direct ByteBuffer")?;
+        .map_err(|_| FfiGuardError::JniBufferError)?;
     let cap = env
         .get_direct_buffer_capacity(buf)
-        .map_err(|_| "failed to query buffer capacity")?;
+        .map_err(|_| FfiGuardError::JniBufferError)?;
 
-    let needed_bytes = count
-        .checked_mul(size_of::<T>())
-        .ok_or("buffer size overflow")?;
-    if (cap as usize) < needed_bytes {
-        return Err("direct buffer capacity smaller than requested count");
-    }
-    if ptr.is_null() || (ptr as usize) % align_of::<T>() != 0 {
-        return Err("direct buffer pointer null or unaligned");
-    }
-
-    Ok(slice::from_raw_parts(ptr as *const T, count))
+    validator.register_read(ptr as *const T, count, Some(cap))
 }
 
-/// Safely view a Java DirectByteBuffer as a mutable slice `&mut [T]`.
-unsafe fn buf_as_mut_slice<'a, T>(
+/// Inspects a Java DirectByteBuffer, verifies it is NOT read-only, and registers it as an
+/// exclusively writable span in `validator`.
+fn register_jni_write<T>(
     env: &mut JNIEnv<'_>,
+    validator: &mut SpanValidator,
     buf: &JByteBuffer<'_>,
     count: usize,
-) -> Result<&'a mut [T], &'static str> {
+) -> Result<RawWriteSpan<T>, FfiGuardError> {
     if count == 0 {
-        return Ok(&mut []);
+        return Ok(RawWriteSpan::empty());
     }
+    if buf.is_null() {
+        return Err(FfiGuardError::NullPointer);
+    }
+    // Reject read-only DirectByteBuffer views (e.g. ByteBuffer#asReadOnlyBuffer())
+    let obj: &JObject<'_> = buf.as_ref();
+    let is_ro = env
+        .call_method(obj, "isReadOnly", "()Z", &[])
+        .and_then(|v| v.z());
+    match is_ro {
+        Ok(true) => return Err(FfiGuardError::ReadOnlyBuffer),
+        Ok(false) => {}
+        Err(_) => {
+            let _ = env.exception_clear();
+            return Err(FfiGuardError::JniBufferError);
+        }
+    }
+
     let ptr = env
         .get_direct_buffer_address(buf)
-        .map_err(|_| "not a direct ByteBuffer")?;
+        .map_err(|_| FfiGuardError::JniBufferError)?;
     let cap = env
         .get_direct_buffer_capacity(buf)
-        .map_err(|_| "failed to query buffer capacity")?;
+        .map_err(|_| FfiGuardError::JniBufferError)?;
 
-    let needed_bytes = count
-        .checked_mul(size_of::<T>())
-        .ok_or("buffer size overflow")?;
-    if (cap as usize) < needed_bytes {
-        return Err("direct buffer capacity smaller than requested count");
-    }
-    if ptr.is_null() || (ptr as usize) % align_of::<T>() != 0 {
-        return Err("direct buffer pointer null or unaligned");
-    }
-
-    Ok(slice::from_raw_parts_mut(ptr as *mut T, count))
+    validator.register_write(ptr as *mut T, count, Some(cap))
 }
 
 #[no_mangle]
@@ -93,20 +103,19 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
-    let info = catch_unwind(AssertUnwindSafe(|| {
-        format!(
+    catch_unwind(AssertUnwindSafe(|| {
+        let info = format!(
             "spica-rust-native v{} | os={}-{} | threads={}",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH,
             crate::active_threads()
-        )
+        );
+        env.new_string(info)
+            .map(|s| s.into_raw())
+            .unwrap_or(std::ptr::null_mut())
     }))
-    .unwrap_or_else(|_| "spica-rust-native (panic)".to_string());
-
-    env.new_string(info)
-        .map(|s| s.into_raw())
-        .unwrap_or(std::ptr::null_mut())
+    .unwrap_or(std::ptr::null_mut())
 }
 
 #[no_mangle]
@@ -132,31 +141,59 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     }
     let n = count as usize;
 
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(xs) = buf_as_slice::<f32>(&mut env, &xs_buf, n) else { return -1; };
-        let Ok(ys) = buf_as_slice::<f32>(&mut env, &ys_buf, n) else { return -1; };
-        let Ok(zs) = buf_as_slice::<f32>(&mut env, &zs_buf, n) else { return -1; };
-        let Ok(radii) = buf_as_slice::<f32>(&mut env, &radii_buf, n) else { return -1; };
-        let Ok(opx) = buf_as_mut_slice::<f32>(&mut env, &out_px_buf, n) else { return -1; };
-        let Ok(opy) = buf_as_mut_slice::<f32>(&mut env, &out_py_buf, n) else { return -1; };
-        let Ok(opz) = buf_as_mut_slice::<f32>(&mut env, &out_pz_buf, n) else { return -1; };
-        let Ok(oc) = buf_as_mut_slice::<i32>(&mut env, &out_counts_buf, n) else { return -1; };
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(xs_r) = register_jni_read::<f32>(&mut env, &mut guard, &xs_buf, n) else {
+            return -1;
+        };
+        let Ok(ys_r) = register_jni_read::<f32>(&mut env, &mut guard, &ys_buf, n) else {
+            return -1;
+        };
+        let Ok(zs_r) = register_jni_read::<f32>(&mut env, &mut guard, &zs_buf, n) else {
+            return -1;
+        };
+        let Ok(rad_r) = register_jni_read::<f32>(&mut env, &mut guard, &radii_buf, n) else {
+            return -1;
+        };
+        let Ok(mut opx_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_px_buf, n) else {
+            return -1;
+        };
+        let Ok(mut opy_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_py_buf, n) else {
+            return -1;
+        };
+        let Ok(mut opz_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_pz_buf, n) else {
+            return -1;
+        };
+        let Ok(mut oc_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_counts_buf, n) else {
+            return -1;
+        };
 
-        crate::run_in_pool(|| {
-            kernels::compute_entity_collisions(
-                xs,
-                ys,
-                zs,
-                radii,
-                cell_size,
-                push_strength,
-                max_push,
-                opx,
-                opy,
-                opz,
-                oc,
-            )
-        })
+        unsafe {
+            let xs = xs_r.as_slice();
+            let ys = ys_r.as_slice();
+            let zs = zs_r.as_slice();
+            let radii = rad_r.as_slice();
+            let opx = opx_w.as_mut_slice();
+            let opy = opy_w.as_mut_slice();
+            let opz = opz_w.as_mut_slice();
+            let oc = oc_w.as_mut_slice();
+
+            crate::run_in_pool(|| {
+                kernels::compute_entity_collisions(
+                    xs,
+                    ys,
+                    zs,
+                    radii,
+                    cell_size,
+                    push_strength,
+                    max_push,
+                    opx,
+                    opy,
+                    opz,
+                    oc,
+                )
+            })
+        }
     }))
     .unwrap_or(-1)
 }
@@ -189,38 +226,78 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     let n = mob_count as usize;
     let m = target_count.max(0) as usize;
 
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(mx) = buf_as_slice::<f32>(&mut env, &mob_x_buf, n) else { return -1; };
-        let Ok(my) = buf_as_slice::<f32>(&mut env, &mob_y_buf, n) else { return -1; };
-        let Ok(mz) = buf_as_slice::<f32>(&mut env, &mob_z_buf, n) else { return -1; };
-        let Ok(tx) = buf_as_slice::<f32>(&mut env, &target_x_buf, m) else { return -1; };
-        let Ok(ty) = buf_as_slice::<f32>(&mut env, &target_y_buf, m) else { return -1; };
-        let Ok(tz) = buf_as_slice::<f32>(&mut env, &target_z_buf, m) else { return -1; };
-        let Ok(oi) = buf_as_mut_slice::<i32>(&mut env, &out_idx_buf, n) else { return -1; };
-        let Ok(od) = buf_as_mut_slice::<f32>(&mut env, &out_dist_sq_buf, n) else { return -1; };
-        let Ok(odx) = buf_as_mut_slice::<f32>(&mut env, &out_dx_buf, n) else { return -1; };
-        let Ok(ody) = buf_as_mut_slice::<f32>(&mut env, &out_dy_buf, n) else { return -1; };
-        let Ok(odz) = buf_as_mut_slice::<f32>(&mut env, &out_dz_buf, n) else { return -1; };
-        let Ok(ot) = buf_as_mut_slice::<i32>(&mut env, &out_lod_buf, n) else { return -1; };
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(mx_r) = register_jni_read::<f32>(&mut env, &mut guard, &mob_x_buf, n) else {
+            return -1;
+        };
+        let Ok(my_r) = register_jni_read::<f32>(&mut env, &mut guard, &mob_y_buf, n) else {
+            return -1;
+        };
+        let Ok(mz_r) = register_jni_read::<f32>(&mut env, &mut guard, &mob_z_buf, n) else {
+            return -1;
+        };
+        let Ok(tx_r) = register_jni_read::<f32>(&mut env, &mut guard, &target_x_buf, m) else {
+            return -1;
+        };
+        let Ok(ty_r) = register_jni_read::<f32>(&mut env, &mut guard, &target_y_buf, m) else {
+            return -1;
+        };
+        let Ok(tz_r) = register_jni_read::<f32>(&mut env, &mut guard, &target_z_buf, m) else {
+            return -1;
+        };
+        let Ok(mut oi_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_idx_buf, n) else {
+            return -1;
+        };
+        let Ok(mut od_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_dist_sq_buf, n) else {
+            return -1;
+        };
+        let Ok(mut odx_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_dx_buf, n) else {
+            return -1;
+        };
+        let Ok(mut ody_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_dy_buf, n) else {
+            return -1;
+        };
+        let Ok(mut odz_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_dz_buf, n) else {
+            return -1;
+        };
+        let Ok(mut ot_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_lod_buf, n) else {
+            return -1;
+        };
 
-        crate::run_in_pool(|| {
-            kernels::compute_ai_targets(
-                mx,
-                my,
-                mz,
-                tx,
-                ty,
-                tz,
-                full_range,
-                reduced_range,
-                oi,
-                od,
-                odx,
-                ody,
-                odz,
-                ot,
-            )
-        })
+        unsafe {
+            let mx = mx_r.as_slice();
+            let my = my_r.as_slice();
+            let mz = mz_r.as_slice();
+            let tx = tx_r.as_slice();
+            let ty = ty_r.as_slice();
+            let tz = tz_r.as_slice();
+            let oi = oi_w.as_mut_slice();
+            let od = od_w.as_mut_slice();
+            let odx = odx_w.as_mut_slice();
+            let ody = ody_w.as_mut_slice();
+            let odz = odz_w.as_mut_slice();
+            let ot = ot_w.as_mut_slice();
+
+            crate::run_in_pool(|| {
+                kernels::compute_ai_targets(
+                    mx,
+                    my,
+                    mz,
+                    tx,
+                    ty,
+                    tz,
+                    full_range,
+                    reduced_range,
+                    oi,
+                    od,
+                    odx,
+                    ody,
+                    odz,
+                    ot,
+                )
+            })
+        }
     }))
     .unwrap_or(-1)
 }
@@ -255,39 +332,70 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     }
     let n = count as usize;
 
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(xs) = buf_as_slice::<f32>(&mut env, &xs_buf, n) else { return -1; };
-        let Ok(ys) = buf_as_slice::<f32>(&mut env, &ys_buf, n) else { return -1; };
-        let Ok(zs) = buf_as_slice::<f32>(&mut env, &zs_buf, n) else { return -1; };
-        let Ok(vxs) = buf_as_slice::<f32>(&mut env, &vxs_buf, n) else { return -1; };
-        let Ok(vys) = buf_as_slice::<f32>(&mut env, &vys_buf, n) else { return -1; };
-        let Ok(vzs) = buf_as_slice::<f32>(&mut env, &vzs_buf, n) else { return -1; };
-        let Ok(oax) = buf_as_mut_slice::<f32>(&mut env, &out_ax_buf, n) else { return -1; };
-        let Ok(oay) = buf_as_mut_slice::<f32>(&mut env, &out_ay_buf, n) else { return -1; };
-        let Ok(oaz) = buf_as_mut_slice::<f32>(&mut env, &out_az_buf, n) else { return -1; };
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(xs_r) = register_jni_read::<f32>(&mut env, &mut guard, &xs_buf, n) else {
+            return -1;
+        };
+        let Ok(ys_r) = register_jni_read::<f32>(&mut env, &mut guard, &ys_buf, n) else {
+            return -1;
+        };
+        let Ok(zs_r) = register_jni_read::<f32>(&mut env, &mut guard, &zs_buf, n) else {
+            return -1;
+        };
+        let Ok(vxs_r) = register_jni_read::<f32>(&mut env, &mut guard, &vxs_buf, n) else {
+            return -1;
+        };
+        let Ok(vys_r) = register_jni_read::<f32>(&mut env, &mut guard, &vys_buf, n) else {
+            return -1;
+        };
+        let Ok(vzs_r) = register_jni_read::<f32>(&mut env, &mut guard, &vzs_buf, n) else {
+            return -1;
+        };
+        let Ok(mut oax_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_ax_buf, n) else {
+            return -1;
+        };
+        let Ok(mut oay_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_ay_buf, n) else {
+            return -1;
+        };
+        let Ok(mut oaz_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_az_buf, n) else {
+            return -1;
+        };
 
-        crate::run_in_pool(|| {
-            kernels::compute_boids_steering(
-                xs,
-                ys,
-                zs,
-                vxs,
-                vys,
-                vzs,
-                goal_x,
-                goal_y,
-                goal_z,
-                perception_radius,
-                sep_weight,
-                align_weight,
-                cohesion_weight,
-                goal_weight,
-                max_force,
-                oax,
-                oay,
-                oaz,
-            )
-        })
+        unsafe {
+            let xs = xs_r.as_slice();
+            let ys = ys_r.as_slice();
+            let zs = zs_r.as_slice();
+            let vxs = vxs_r.as_slice();
+            let vys = vys_r.as_slice();
+            let vzs = vzs_r.as_slice();
+            let oax = oax_w.as_mut_slice();
+            let oay = oay_w.as_mut_slice();
+            let oaz = oaz_w.as_mut_slice();
+
+            crate::run_in_pool(|| {
+                kernels::compute_boids_steering(
+                    xs,
+                    ys,
+                    zs,
+                    vxs,
+                    vys,
+                    vzs,
+                    goal_x,
+                    goal_y,
+                    goal_z,
+                    perception_radius,
+                    sep_weight,
+                    align_weight,
+                    cohesion_weight,
+                    goal_weight,
+                    max_force,
+                    oax,
+                    oay,
+                    oaz,
+                )
+            })
+        }
     }))
     .unwrap_or(-1)
 }
@@ -314,13 +422,33 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     let n = count as usize;
     let m = max_results as usize;
 
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(xs) = buf_as_slice::<f32>(&mut env, &xs_buf, n) else { return -1; };
-        let Ok(ys) = buf_as_slice::<f32>(&mut env, &ys_buf, n) else { return -1; };
-        let Ok(zs) = buf_as_slice::<f32>(&mut env, &zs_buf, n) else { return -1; };
-        let Ok(out) = buf_as_mut_slice::<i32>(&mut env, &out_indices_buf, m) else { return -1; };
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(xs_r) = register_jni_read::<f32>(&mut env, &mut guard, &xs_buf, n) else {
+            return -1;
+        };
+        let Ok(ys_r) = register_jni_read::<f32>(&mut env, &mut guard, &ys_buf, n) else {
+            return -1;
+        };
+        let Ok(zs_r) = register_jni_read::<f32>(&mut env, &mut guard, &zs_buf, n) else {
+            return -1;
+        };
+        let Ok(mut out_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_indices_buf, m) else {
+            return -1;
+        };
 
-        kernels::query_radius(xs, ys, zs, qx, qy, qz, radius, out)
+        unsafe {
+            kernels::query_radius(
+                xs_r.as_slice(),
+                ys_r.as_slice(),
+                zs_r.as_slice(),
+                qx,
+                qy,
+                qz,
+                radius,
+                out_w.as_mut_slice(),
+            )
+        }
     }))
     .unwrap_or(-1)
 }
@@ -346,40 +474,50 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     let n = entity_count as usize;
     let m = max_hot_chunks as usize;
 
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(xs) = buf_as_slice::<f32>(&mut env, &xs_buf, n) else { return -1; };
-        let Ok(zs) = buf_as_slice::<f32>(&mut env, &zs_buf, n) else { return -1; };
-        let neighbor_counts: &[i32] = if neighbor_counts_buf.is_null() {
-            &[]
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(xs_r) = register_jni_read::<f32>(&mut env, &mut guard, &xs_buf, n) else {
+            return -1;
+        };
+        let Ok(zs_r) = register_jni_read::<f32>(&mut env, &mut guard, &zs_buf, n) else {
+            return -1;
+        };
+        let nc_r = if neighbor_counts_buf.is_null() {
+            RawReadSpan::empty()
         } else {
-            let Ok(nc) = buf_as_slice::<i32>(&mut env, &neighbor_counts_buf, n) else {
+            let Ok(nc) = register_jni_read::<i32>(&mut env, &mut guard, &neighbor_counts_buf, n)
+            else {
                 return -1;
             };
             nc
         };
-        let Ok(out_cx) = buf_as_mut_slice::<i32>(&mut env, &out_chunk_x_buf, m) else {
+        let Ok(mut cx_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_chunk_x_buf, m) else {
             return -1;
         };
-        let Ok(out_cz) = buf_as_mut_slice::<i32>(&mut env, &out_chunk_z_buf, m) else {
+        let Ok(mut cz_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_chunk_z_buf, m) else {
             return -1;
         };
-        let Ok(out_ec) = buf_as_mut_slice::<i32>(&mut env, &out_entity_count_buf, m) else {
+        let Ok(mut ec_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_entity_count_buf, m)
+        else {
             return -1;
         };
-        let Ok(out_cc) = buf_as_mut_slice::<i32>(&mut env, &out_crowded_count_buf, m) else {
+        let Ok(mut cc_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_crowded_count_buf, m)
+        else {
             return -1;
         };
 
-        heatmap::analyze_chunks(
-            xs,
-            zs,
-            neighbor_counts,
-            m,
-            out_cx,
-            out_cz,
-            out_ec,
-            out_cc,
-        )
+        unsafe {
+            heatmap::analyze_chunks(
+                xs_r.as_slice(),
+                zs_r.as_slice(),
+                nc_r.as_slice(),
+                m,
+                cx_w.as_mut_slice(),
+                cz_w.as_mut_slice(),
+                ec_w.as_mut_slice(),
+                cc_w.as_mut_slice(),
+            )
+        }
     }))
     .unwrap_or(-1)
 }
@@ -407,32 +545,45 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     let n = item_count as usize;
     let m = max_pairs as usize;
 
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(xs) = buf_as_slice::<f32>(&mut env, &xs_buf, n) else { return -1; };
-        let Ok(ys) = buf_as_slice::<f32>(&mut env, &ys_buf, n) else { return -1; };
-        let Ok(zs) = buf_as_slice::<f32>(&mut env, &zs_buf, n) else { return -1; };
-        let Ok(type_ids) = buf_as_slice::<i32>(&mut env, &type_ids_buf, n) else { return -1; };
-        let Ok(stack_amounts) = buf_as_slice::<i32>(&mut env, &stack_amounts_buf, n) else {
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(xs_r) = register_jni_read::<f32>(&mut env, &mut guard, &xs_buf, n) else {
             return -1;
         };
-        let Ok(out_target) = buf_as_mut_slice::<i32>(&mut env, &out_target_idx_buf, m) else {
+        let Ok(ys_r) = register_jni_read::<f32>(&mut env, &mut guard, &ys_buf, n) else {
             return -1;
         };
-        let Ok(out_source) = buf_as_mut_slice::<i32>(&mut env, &out_source_idx_buf, m) else {
+        let Ok(zs_r) = register_jni_read::<f32>(&mut env, &mut guard, &zs_buf, n) else {
+            return -1;
+        };
+        let Ok(ti_r) = register_jni_read::<i32>(&mut env, &mut guard, &type_ids_buf, n) else {
+            return -1;
+        };
+        let Ok(sa_r) = register_jni_read::<i32>(&mut env, &mut guard, &stack_amounts_buf, n) else {
+            return -1;
+        };
+        let Ok(mut ot_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_target_idx_buf, m)
+        else {
+            return -1;
+        };
+        let Ok(mut os_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_source_idx_buf, m)
+        else {
             return -1;
         };
 
-        kernels::plan_item_merges(
-            xs,
-            ys,
-            zs,
-            type_ids,
-            stack_amounts,
-            max_stack_size,
-            merge_radius,
-            out_target,
-            out_source,
-        )
+        unsafe {
+            kernels::plan_item_merges(
+                xs_r.as_slice(),
+                ys_r.as_slice(),
+                zs_r.as_slice(),
+                ti_r.as_slice(),
+                sa_r.as_slice(),
+                max_stack_size,
+                merge_radius,
+                ot_w.as_mut_slice(),
+                os_w.as_mut_slice(),
+            )
+        }
     }))
     .unwrap_or(-1)
 }
@@ -455,38 +606,46 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     out_int_state_buf: JByteBuffer<'local>,
     out_float_params_buf: JByteBuffer<'local>,
 ) -> jint {
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(out_ints) = buf_as_mut_slice::<i32>(&mut env, &out_int_state_buf, 4) else {
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(mut oi_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_int_state_buf, 4)
+        else {
             return -1;
         };
-        let Ok(out_floats) = buf_as_mut_slice::<f32>(&mut env, &out_float_params_buf, 4) else {
+        let Ok(mut of_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_float_params_buf, 4)
+        else {
             return -1;
         };
 
-        let result = governor::evaluate_governor(
-            current_mspt,
-            ewma_mspt,
-            loaded_entities,
-            online_players,
-            base_full_range,
-            base_hibernate_range,
-            min_view_dist,
-            max_view_dist,
-            min_sim_dist,
-            max_sim_dist,
-        );
+        unsafe {
+            let out_ints = oi_w.as_mut_slice();
+            let out_floats = of_w.as_mut_slice();
 
-        out_ints[0] = result.state_code;
-        out_ints[1] = result.view_dist;
-        out_ints[2] = result.sim_dist;
-        out_ints[3] = result.enable_item_merge;
+            let result = governor::evaluate_governor(
+                current_mspt,
+                ewma_mspt,
+                loaded_entities,
+                online_players,
+                base_full_range,
+                base_hibernate_range,
+                min_view_dist,
+                max_view_dist,
+                min_sim_dist,
+                max_sim_dist,
+            );
 
-        out_floats[0] = result.full_ai_range;
-        out_floats[1] = result.hibernate_range;
-        out_floats[2] = result.merge_radius;
-        out_floats[3] = result.ewma_mspt;
+            out_ints[0] = result.state_code;
+            out_ints[1] = result.view_dist;
+            out_ints[2] = result.sim_dist;
+            out_ints[3] = result.enable_item_merge;
 
-        result.state_code
+            out_floats[0] = result.full_ai_range;
+            out_floats[1] = result.hibernate_range;
+            out_floats[2] = result.merge_radius;
+            out_floats[3] = result.ewma_mspt;
+
+            result.state_code
+        }
     }))
     .unwrap_or(-1)
 }
@@ -521,52 +680,70 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     let n = entity_count as usize;
     let p = player_count.max(0) as usize;
 
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(xs) = buf_as_slice::<f32>(&mut env, &xs_buf, n) else { return -1; };
-        let Ok(ys) = buf_as_slice::<f32>(&mut env, &ys_buf, n) else { return -1; };
-        let Ok(zs) = buf_as_slice::<f32>(&mut env, &zs_buf, n) else { return -1; };
-        let Ok(entity_flags) = buf_as_slice::<i32>(&mut env, &entity_flags_buf, n) else {
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(xs_r) = register_jni_read::<f32>(&mut env, &mut guard, &xs_buf, n) else {
             return -1;
         };
-
-        let (player_xs, player_ys, player_zs): (&[f32], &[f32], &[f32]) = if p == 0 {
-            (&[], &[], &[])
-        } else {
-            let Ok(pxs) = buf_as_slice::<f32>(&mut env, &player_xs_buf, p) else { return -1; };
-            let Ok(pys) = buf_as_slice::<f32>(&mut env, &player_ys_buf, p) else { return -1; };
-            let Ok(pzs) = buf_as_slice::<f32>(&mut env, &player_zs_buf, p) else { return -1; };
-            (pxs, pys, pzs)
-        };
-
-        let Ok(out_actions) = buf_as_mut_slice::<i32>(&mut env, &out_actions_buf, n) else {
+        let Ok(ys_r) = register_jni_read::<f32>(&mut env, &mut guard, &ys_buf, n) else {
             return -1;
         };
-        let Ok(out_neighbor_counts) =
-            buf_as_mut_slice::<i32>(&mut env, &out_neighbor_counts_buf, n)
+        let Ok(zs_r) = register_jni_read::<f32>(&mut env, &mut guard, &zs_buf, n) else {
+            return -1;
+        };
+        let Ok(fl_r) = register_jni_read::<i32>(&mut env, &mut guard, &entity_flags_buf, n) else {
+            return -1;
+        };
+        let Ok(px_r) = register_jni_read::<f32>(&mut env, &mut guard, &player_xs_buf, p) else {
+            return -1;
+        };
+        let Ok(py_r) = register_jni_read::<f32>(&mut env, &mut guard, &player_ys_buf, p) else {
+            return -1;
+        };
+        let Ok(pz_r) = register_jni_read::<f32>(&mut env, &mut guard, &player_zs_buf, p) else {
+            return -1;
+        };
+        let Ok(mut oa_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_actions_buf, n) else {
+            return -1;
+        };
+        let Ok(mut on_w) =
+            register_jni_write::<i32>(&mut env, &mut guard, &out_neighbor_counts_buf, n)
         else {
             return -1;
         };
 
-        crate::run_in_pool(|| {
-            farm_governor::evaluate_farm_throttling(
-                xs,
-                ys,
-                zs,
-                entity_flags,
-                player_xs,
-                player_ys,
-                player_zs,
-                crowd_radius,
-                mild_crowd_threshold,
-                severe_crowd_threshold,
-                chunk_mob_limit,
-                villager_wake_range,
-                villager_crowd_threshold,
-                brain_state_code,
-                out_actions,
-                out_neighbor_counts,
-            )
-        })
+        unsafe {
+            let xs = xs_r.as_slice();
+            let ys = ys_r.as_slice();
+            let zs = zs_r.as_slice();
+            let entity_flags = fl_r.as_slice();
+            let player_xs = px_r.as_slice();
+            let player_ys = py_r.as_slice();
+            let player_zs = pz_r.as_slice();
+            let out_actions = oa_w.as_mut_slice();
+            let out_neighbor_counts = on_w.as_mut_slice();
+
+            crate::run_in_pool(|| {
+                farm_governor::evaluate_farm_throttling(
+                    xs,
+                    ys,
+                    zs,
+                    entity_flags,
+                    player_xs,
+                    player_ys,
+                    player_zs,
+                    crowd_radius,
+                    mild_crowd_threshold,
+                    severe_crowd_threshold,
+                    chunk_mob_limit,
+                    villager_wake_range,
+                    villager_crowd_threshold,
+                    brain_state_code,
+                    out_actions,
+                    out_neighbor_counts,
+                )
+            })
+        }
     }))
     .unwrap_or(-1)
 }
@@ -596,42 +773,62 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     }
     let n = player_count as usize;
 
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(px) = buf_as_slice::<f32>(&mut env, &px_buf, n) else { return -1; };
-        let Ok(py) = buf_as_slice::<f32>(&mut env, &py_buf, n) else { return -1; };
-        let Ok(pz) = buf_as_slice::<f32>(&mut env, &pz_buf, n) else { return -1; };
-        let Ok(vx) = buf_as_slice::<f32>(&mut env, &vx_buf, n) else { return -1; };
-        let Ok(vy) = buf_as_slice::<f32>(&mut env, &vy_buf, n) else { return -1; };
-        let Ok(vz) = buf_as_slice::<f32>(&mut env, &vz_buf, n) else { return -1; };
-        let Ok(is_gliding) = buf_as_slice::<i32>(&mut env, &is_gliding_buf, n) else { return -1; };
-        let Ok(out_actions) = buf_as_mut_slice::<i32>(&mut env, &out_actions_buf, n) else {
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(px_r) = register_jni_read::<f32>(&mut env, &mut guard, &px_buf, n) else {
             return -1;
         };
-        let Ok(out_cvx) = buf_as_mut_slice::<f32>(&mut env, &out_clamped_vx_buf, n) else {
+        let Ok(py_r) = register_jni_read::<f32>(&mut env, &mut guard, &py_buf, n) else {
             return -1;
         };
-        let Ok(out_cvy) = buf_as_mut_slice::<f32>(&mut env, &out_clamped_vy_buf, n) else {
+        let Ok(pz_r) = register_jni_read::<f32>(&mut env, &mut guard, &pz_buf, n) else {
             return -1;
         };
-        let Ok(out_cvz) = buf_as_mut_slice::<f32>(&mut env, &out_clamped_vz_buf, n) else {
+        let Ok(vx_r) = register_jni_read::<f32>(&mut env, &mut guard, &vx_buf, n) else {
+            return -1;
+        };
+        let Ok(vy_r) = register_jni_read::<f32>(&mut env, &mut guard, &vy_buf, n) else {
+            return -1;
+        };
+        let Ok(vz_r) = register_jni_read::<f32>(&mut env, &mut guard, &vz_buf, n) else {
+            return -1;
+        };
+        let Ok(gl_r) = register_jni_read::<i32>(&mut env, &mut guard, &is_gliding_buf, n) else {
+            return -1;
+        };
+        let Ok(mut oa_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_actions_buf, n) else {
+            return -1;
+        };
+        let Ok(mut cvx_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_clamped_vx_buf, n)
+        else {
+            return -1;
+        };
+        let Ok(mut cvy_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_clamped_vy_buf, n)
+        else {
+            return -1;
+        };
+        let Ok(mut cvz_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_clamped_vz_buf, n)
+        else {
             return -1;
         };
 
-        surge_guard::evaluate_player_surges(
-            px,
-            py,
-            pz,
-            vx,
-            vy,
-            vz,
-            is_gliding,
-            brain_state_code,
-            base_max_elytra_speed,
-            out_actions,
-            out_cvx,
-            out_cvy,
-            out_cvz,
-        )
+        unsafe {
+            surge_guard::evaluate_player_surges(
+                px_r.as_slice(),
+                py_r.as_slice(),
+                pz_r.as_slice(),
+                vx_r.as_slice(),
+                vy_r.as_slice(),
+                vz_r.as_slice(),
+                gl_r.as_slice(),
+                brain_state_code,
+                base_max_elytra_speed,
+                oa_w.as_mut_slice(),
+                cvx_w.as_mut_slice(),
+                cvy_w.as_mut_slice(),
+                cvz_w.as_mut_slice(),
+            )
+        }
     }))
     .unwrap_or(-1)
 }
@@ -667,23 +864,33 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
         return -1;
     }
 
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(cost_grid) = buf_as_slice::<u8>(&mut env, &cost_grid_buf, len) else { return -1; };
-        let Ok(out_dist) = buf_as_mut_slice::<f32>(&mut env, &out_dist_buf, len) else {
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(cg_r) = register_jni_read::<u8>(&mut env, &mut guard, &cost_grid_buf, len) else {
             return -1;
         };
-        let Ok(out_dir_x) = buf_as_mut_slice::<f32>(&mut env, &out_dir_x_buf, len) else {
+        let Ok(mut od_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_dist_buf, len) else {
             return -1;
         };
-        let Ok(out_dir_z) = buf_as_mut_slice::<f32>(&mut env, &out_dir_z_buf, len) else {
+        let Ok(mut ox_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_dir_x_buf, len) else {
+            return -1;
+        };
+        let Ok(mut oz_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_dir_z_buf, len) else {
             return -1;
         };
 
-        crate::run_in_pool(|| {
-            flowfield::compute_flow_field(
-                w, d, cost_grid, gx, gz, out_dist, out_dir_x, out_dir_z,
-            )
-        })
+        unsafe {
+            let cost_grid = cg_r.as_slice();
+            let out_dist = od_w.as_mut_slice();
+            let out_dir_x = ox_w.as_mut_slice();
+            let out_dir_z = oz_w.as_mut_slice();
+
+            crate::run_in_pool(|| {
+                flowfield::compute_flow_field(
+                    w, d, cost_grid, gx, gz, out_dist, out_dir_x, out_dir_z,
+                )
+            })
+        }
     }))
     .unwrap_or(-1)
 }
@@ -717,26 +924,31 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
         return -1;
     }
 
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(out_heights) = buf_as_mut_slice::<f32>(&mut env, &out_heights_buf, total) else {
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(mut oh_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_heights_buf, total)
+        else {
             return -1;
         };
 
-        crate::run_in_pool(|| {
-            noise::generate_noise_2d(
-                origin_x,
-                origin_z,
-                w,
-                d,
-                step,
-                seed,
-                octaves,
-                frequency,
-                lacunarity,
-                persistence,
-                out_heights,
-            )
-        })
+        unsafe {
+            let out_heights = oh_w.as_mut_slice();
+            crate::run_in_pool(|| {
+                noise::generate_noise_2d(
+                    origin_x,
+                    origin_z,
+                    w,
+                    d,
+                    step,
+                    seed,
+                    octaves,
+                    frequency,
+                    lacunarity,
+                    persistence,
+                    out_heights,
+                )
+            })
+        }
     }))
     .unwrap_or(-1)
 }
@@ -773,13 +985,16 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     out_stats_buf: JByteBuffer<'local>,
 ) -> jint {
     if mob_count <= 0 || player_count <= 0 {
-        let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
             if !out_stats_buf.is_null() {
-                if let Ok(out_stats) = buf_as_mut_slice::<i32>(&mut env, &out_stats_buf, 4) {
-                    out_stats[0] = 0;
-                    out_stats[1] = 0;
-                    out_stats[2] = 0;
-                    out_stats[3] = 0;
+                let mut guard = SpanValidator::new();
+                if let Ok(mut os_w) =
+                    register_jni_write::<i32>(&mut env, &mut guard, &out_stats_buf, 4)
+                {
+                    unsafe {
+                        let out_stats = os_w.as_mut_slice();
+                        out_stats.fill(0);
+                    }
                 }
             }
         }));
@@ -794,83 +1009,110 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     };
     let bitset_bytes = (total_bits >> 3) + usize::from((total_bits & 7) != 0);
 
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(mob_xs) = buf_as_slice::<f32>(&mut env, &mob_xs_buf, m) else { return -1; };
-        let Ok(mob_ys) = buf_as_slice::<f32>(&mut env, &mob_ys_buf, m) else { return -1; };
-        let Ok(mob_zs) = buf_as_slice::<f32>(&mut env, &mob_zs_buf, m) else { return -1; };
-        let Ok(mob_flags) = buf_as_slice::<i32>(&mut env, &mob_flags_buf, m) else {
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(mxs_r) = register_jni_read::<f32>(&mut env, &mut guard, &mob_xs_buf, m) else {
+            return -1;
+        };
+        let Ok(mys_r) = register_jni_read::<f32>(&mut env, &mut guard, &mob_ys_buf, m) else {
+            return -1;
+        };
+        let Ok(mzs_r) = register_jni_read::<f32>(&mut env, &mut guard, &mob_zs_buf, m) else {
+            return -1;
+        };
+        let Ok(mfl_r) = register_jni_read::<i32>(&mut env, &mut guard, &mob_flags_buf, m) else {
+            return -1;
+        };
+        let Ok(pxs_r) = register_jni_read::<f32>(&mut env, &mut guard, &player_xs_buf, p) else {
+            return -1;
+        };
+        let Ok(pys_r) = register_jni_read::<f32>(&mut env, &mut guard, &player_ys_buf, p) else {
+            return -1;
+        };
+        let Ok(pzs_r) = register_jni_read::<f32>(&mut env, &mut guard, &player_zs_buf, p) else {
+            return -1;
+        };
+        let Ok(plx_r) = register_jni_read::<f32>(&mut env, &mut guard, &player_look_xs_buf, p)
+        else {
+            return -1;
+        };
+        let Ok(ply_r) = register_jni_read::<f32>(&mut env, &mut guard, &player_look_ys_buf, p)
+        else {
+            return -1;
+        };
+        let Ok(plz_r) = register_jni_read::<f32>(&mut env, &mut guard, &player_look_zs_buf, p)
+        else {
             return -1;
         };
 
-        let Ok(player_xs) = buf_as_slice::<f32>(&mut env, &player_xs_buf, p) else {
+        let Ok(mut hb_w) =
+            register_jni_write::<u8>(&mut env, &mut guard, &visibility_bitset_buf, bitset_bytes)
+        else {
             return -1;
         };
-        let Ok(player_ys) = buf_as_slice::<f32>(&mut env, &player_ys_buf, p) else {
+        let Ok(mut dp_w) =
+            register_jni_write::<i32>(&mut env, &mut guard, &out_delta_player_idx_buf, max_d)
+        else {
             return -1;
         };
-        let Ok(player_zs) = buf_as_slice::<f32>(&mut env, &player_zs_buf, p) else {
+        let Ok(mut dm_w) =
+            register_jni_write::<i32>(&mut env, &mut guard, &out_delta_mob_idx_buf, max_d)
+        else {
             return -1;
         };
-        let Ok(player_look_xs) = buf_as_slice::<f32>(&mut env, &player_look_xs_buf, p) else {
+        let Ok(mut da_w) =
+            register_jni_write::<i32>(&mut env, &mut guard, &out_delta_action_buf, max_d)
+        else {
             return -1;
         };
-        let Ok(player_look_ys) = buf_as_slice::<f32>(&mut env, &player_look_ys_buf, p) else {
-            return -1;
-        };
-        let Ok(player_look_zs) = buf_as_slice::<f32>(&mut env, &player_look_zs_buf, p) else {
+        let Ok(mut os_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_stats_buf, 4) else {
             return -1;
         };
 
-        let Ok(hidden_bitset) =
-            buf_as_mut_slice::<u8>(&mut env, &visibility_bitset_buf, bitset_bytes)
-        else {
-            return -1;
-        };
-        let Ok(out_delta_player_idx) =
-            buf_as_mut_slice::<i32>(&mut env, &out_delta_player_idx_buf, max_d)
-        else {
-            return -1;
-        };
-        let Ok(out_delta_mob_idx) =
-            buf_as_mut_slice::<i32>(&mut env, &out_delta_mob_idx_buf, max_d)
-        else {
-            return -1;
-        };
-        let Ok(out_delta_action) =
-            buf_as_mut_slice::<i32>(&mut env, &out_delta_action_buf, max_d)
-        else {
-            return -1;
-        };
-        let Ok(out_stats) = buf_as_mut_slice::<i32>(&mut env, &out_stats_buf, 4) else {
-            return -1;
-        };
+        unsafe {
+            let mob_xs = mxs_r.as_slice();
+            let mob_ys = mys_r.as_slice();
+            let mob_zs = mzs_r.as_slice();
+            let mob_flags = mfl_r.as_slice();
+            let player_xs = pxs_r.as_slice();
+            let player_ys = pys_r.as_slice();
+            let player_zs = pzs_r.as_slice();
+            let player_look_xs = plx_r.as_slice();
+            let player_look_ys = ply_r.as_slice();
+            let player_look_zs = plz_r.as_slice();
+            let hidden_bitset = hb_w.as_mut_slice();
+            let out_delta_player_idx = dp_w.as_mut_slice();
+            let out_delta_mob_idx = dm_w.as_mut_slice();
+            let out_delta_action = da_w.as_mut_slice();
+            let out_stats = os_w.as_mut_slice();
 
-        crate::run_in_pool(|| {
-            mob_tracker::compute_mob_tracking(
-                mob_xs,
-                mob_ys,
-                mob_zs,
-                mob_flags,
-                player_xs,
-                player_ys,
-                player_zs,
-                player_look_xs,
-                player_look_ys,
-                player_look_zs,
-                max_track_range,
-                safety_near_range,
-                max_vertical_delta,
-                rear_cull_range,
-                rear_cull_dot_threshold,
-                max_mobs_per_player,
-                brain_state_code,
-                hidden_bitset,
-                out_delta_player_idx,
-                out_delta_mob_idx,
-                out_delta_action,
-                out_stats,
-            )
-        })
+            crate::run_in_pool(|| {
+                mob_tracker::compute_mob_tracking(
+                    mob_xs,
+                    mob_ys,
+                    mob_zs,
+                    mob_flags,
+                    player_xs,
+                    player_ys,
+                    player_zs,
+                    player_look_xs,
+                    player_look_ys,
+                    player_look_zs,
+                    max_track_range,
+                    safety_near_range,
+                    max_vertical_delta,
+                    rear_cull_range,
+                    rear_cull_dot_threshold,
+                    max_mobs_per_player,
+                    brain_state_code,
+                    hidden_bitset,
+                    out_delta_player_idx,
+                    out_delta_mob_idx,
+                    out_delta_action,
+                    out_stats,
+                )
+            })
+        }
     }))
     .unwrap_or(-1)
 }
@@ -897,14 +1139,18 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
 ) -> jint {
     if chunk_count <= 0 {
         if max_top_chunks > 0 {
-            let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
                 if !out_top_indices_buf.is_null() {
-                    if let Ok(out_top) = buf_as_mut_slice::<i32>(
+                    let mut guard = SpanValidator::new();
+                    if let Ok(mut ot_w) = register_jni_write::<i32>(
                         &mut env,
+                        &mut guard,
                         &out_top_indices_buf,
                         max_top_chunks as usize,
                     ) {
-                        out_top.fill(-1);
+                        unsafe {
+                            ot_w.as_mut_slice().fill(-1);
+                        }
                     }
                 }
             }));
@@ -915,52 +1161,69 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     let n = chunk_count as usize;
     let top_k = max_top_chunks.max(0) as usize;
 
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(chunk_xs) = buf_as_slice::<i32>(&mut env, &chunk_xs_buf, n) else { return -1; };
-        let Ok(chunk_zs) = buf_as_slice::<i32>(&mut env, &chunk_zs_buf, n) else { return -1; };
-        let Ok(redstone_per_sec) = buf_as_slice::<i32>(&mut env, &redstone_per_sec_buf, n) else {
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(cxs_r) = register_jni_read::<i32>(&mut env, &mut guard, &chunk_xs_buf, n) else {
             return -1;
         };
-        let Ok(hopper_per_sec) = buf_as_slice::<i32>(&mut env, &hopper_per_sec_buf, n) else {
+        let Ok(czs_r) = register_jni_read::<i32>(&mut env, &mut guard, &chunk_zs_buf, n) else {
             return -1;
         };
-        let Ok(prev_heat) = buf_as_slice::<f32>(&mut env, &prev_heat_buf, n) else { return -1; };
-        let Ok(out_actions) = buf_as_mut_slice::<i32>(&mut env, &out_actions_buf, n) else {
-            return -1;
-        };
-        let Ok(out_new_heat) = buf_as_mut_slice::<f32>(&mut env, &out_new_heat_buf, n) else {
-            return -1;
-        };
-        let Ok(out_throttle_ratio) =
-            buf_as_mut_slice::<f32>(&mut env, &out_throttle_ratio_buf, n)
+        let Ok(rs_r) = register_jni_read::<i32>(&mut env, &mut guard, &redstone_per_sec_buf, n)
         else {
             return -1;
         };
-        let out_top_indices: &mut [i32] = if top_k == 0 {
-            &mut []
-        } else {
-            let Ok(top) = buf_as_mut_slice::<i32>(&mut env, &out_top_indices_buf, top_k) else {
-                return -1;
-            };
-            top
+        let Ok(hop_r) = register_jni_read::<i32>(&mut env, &mut guard, &hopper_per_sec_buf, n)
+        else {
+            return -1;
+        };
+        let Ok(ph_r) = register_jni_read::<f32>(&mut env, &mut guard, &prev_heat_buf, n) else {
+            return -1;
+        };
+        let Ok(mut oa_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_actions_buf, n) else {
+            return -1;
+        };
+        let Ok(mut nh_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_new_heat_buf, n) else {
+            return -1;
+        };
+        let Ok(mut tr_w) = register_jni_write::<f32>(&mut env, &mut guard, &out_throttle_ratio_buf, n)
+        else {
+            return -1;
+        };
+        let Ok(mut top_w) =
+            register_jni_write::<i32>(&mut env, &mut guard, &out_top_indices_buf, top_k)
+        else {
+            return -1;
         };
 
-        crate::run_in_pool(|| {
-            redstone_guard::evaluate_redstone_chunks(
-                chunk_xs,
-                chunk_zs,
-                redstone_per_sec,
-                hopper_per_sec,
-                prev_heat,
-                redstone_limit,
-                hopper_limit,
-                brain_state_code,
-                out_actions,
-                out_new_heat,
-                out_throttle_ratio,
-                out_top_indices,
-            )
-        })
+        unsafe {
+            let chunk_xs = cxs_r.as_slice();
+            let chunk_zs = czs_r.as_slice();
+            let redstone_per_sec = rs_r.as_slice();
+            let hopper_per_sec = hop_r.as_slice();
+            let prev_heat = ph_r.as_slice();
+            let out_actions = oa_w.as_mut_slice();
+            let out_new_heat = nh_w.as_mut_slice();
+            let out_throttle_ratio = tr_w.as_mut_slice();
+            let out_top_indices = top_w.as_mut_slice();
+
+            crate::run_in_pool(|| {
+                redstone_guard::evaluate_redstone_chunks(
+                    chunk_xs,
+                    chunk_zs,
+                    redstone_per_sec,
+                    hopper_per_sec,
+                    prev_heat,
+                    redstone_limit,
+                    hopper_limit,
+                    brain_state_code,
+                    out_actions,
+                    out_new_heat,
+                    out_throttle_ratio,
+                    out_top_indices,
+                )
+            })
+        }
     }))
     .unwrap_or(-1)
 }
@@ -995,36 +1258,46 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     }
     let max_d = max_diffs.max(0) as usize;
 
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        let Ok(cur) = buf_as_slice::<i32>(&mut env, &current_blocks_buf, total) else {
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut guard = SpanValidator::new();
+        let Ok(cur_r) = register_jni_read::<i32>(&mut env, &mut guard, &current_blocks_buf, total)
+        else {
             return -1;
         };
-        let Ok(tgt) = buf_as_slice::<i32>(&mut env, &target_blocks_buf, total) else {
+        let Ok(tgt_r) = register_jni_read::<i32>(&mut env, &mut guard, &target_blocks_buf, total)
+        else {
+            return -1;
+        };
+        let Ok(mut ox_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_rel_x_buf, max_d)
+        else {
+            return -1;
+        };
+        let Ok(mut oy_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_rel_y_buf, max_d)
+        else {
+            return -1;
+        };
+        let Ok(mut oz_w) = register_jni_write::<i32>(&mut env, &mut guard, &out_rel_z_buf, max_d)
+        else {
+            return -1;
+        };
+        let Ok(mut oi_w) =
+            register_jni_write::<i32>(&mut env, &mut guard, &out_new_block_id_buf, max_d)
+        else {
             return -1;
         };
 
-        let (out_x, out_y, out_z, out_id): (&mut [i32], &mut [i32], &mut [i32], &mut [i32]) =
-            if max_d == 0 {
-                (&mut [], &mut [], &mut [], &mut [])
-            } else {
-                let Ok(ox) = buf_as_mut_slice::<i32>(&mut env, &out_rel_x_buf, max_d) else {
-                    return -1;
-                };
-                let Ok(oy) = buf_as_mut_slice::<i32>(&mut env, &out_rel_y_buf, max_d) else {
-                    return -1;
-                };
-                let Ok(oz) = buf_as_mut_slice::<i32>(&mut env, &out_rel_z_buf, max_d) else {
-                    return -1;
-                };
-                let Ok(oi) = buf_as_mut_slice::<i32>(&mut env, &out_new_block_id_buf, max_d) else {
-                    return -1;
-                };
-                (ox, oy, oz, oi)
-            };
+        unsafe {
+            let cur = cur_r.as_slice();
+            let tgt = tgt_r.as_slice();
+            let out_x = ox_w.as_mut_slice();
+            let out_y = oy_w.as_mut_slice();
+            let out_z = oz_w.as_mut_slice();
+            let out_id = oi_w.as_mut_slice();
 
-        crate::run_in_pool(|| {
-            block_diff::compute_block_diff(w, h, d, cur, tgt, out_x, out_y, out_z, out_id)
-        })
+            crate::run_in_pool(|| {
+                block_diff::compute_block_diff(w, h, d, cur, tgt, out_x, out_y, out_z, out_id)
+            })
+        }
     }))
     .unwrap_or(-1)
 }

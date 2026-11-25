@@ -1,4 +1,4 @@
-# SpicaRustNative 2.5.0 (Purpur 1.21.4 Core + Rust Brain + Farm Governor + Surge Guard + Mob Tracking + Redstone/Hopper Governor) Yapilandirmasi
+# SpicaRustNative 2.6.0 (Purpur 1.21.4 Core + Rust Brain + Farm Governor + Surge Guard + Mob Tracking + Redstone/Hopper Governor + Arena Block Diff) Yapilandirmasi
 native:
   # 0 = Otomatik (max(2, cekirdek/2), en fazla 8). Main thread + Netty + GC icin bosluk birakir.
   worker-threads: 0
@@ -66,8 +66,8 @@ farm-governor:
   # Ayni chunk icinde bu siniri asan fazla farm moblarini baskilar.
   chunk-mob-limit: 48
   villager-optimization:
-    # Trading Hall ve sikisik koylulerde guvenli AI baskilama + anlik uyanma ozelligini aktif eder.
-    enabled: true
+    # Trading Hall ve sikisik koylulerde guvenli AI baskilama + anlik uyanma ozelligi (Y3: varsayilan kapali / opt-in).
+    enabled: false
     # Oyuncu bu mesafeye yaklastiginda koylu aninda uyanir (blok).
     wake-range: 8.0
     # Bu sayida koylu bir aradayken veya 1x1 hucreye hapsedilmisse optimize edilir.
@@ -148,6 +148,9 @@ mob-tracking:
 redstone-governor:
   # Rust destekli canli Redstone & Hopper Lag-Machine Governor motorunu aktif eder.
   enabled: true
+  # Guvenli izleme modu (Y4): true iken chunk isisini hesaplar, Top-8 sicak chunklari raporlar ve
+  # LOCKDOWN uyarisi verir ama devre/hopper sinyallerini kesmez. Aktif frenleme icin false yapin.
+  monitor-only: true
   # Chunk basina saniyelik temel Redstone guncelleme limiti (Brain yuk durumunda otomatik daraltilir).
   redstone-limit-per-sec: 320
   # Chunk basina saniyelik temel Hopper/Envanter esya transfer limiti (Brain yuk durumunda otomatik daraltilir).

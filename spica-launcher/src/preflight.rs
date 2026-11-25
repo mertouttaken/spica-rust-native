@@ -16,6 +16,7 @@ pub struct HostHardware {
 pub struct JvmPlan {
     pub java_bin: String,
     pub args: Vec<String>,
+    pub ipc_token: String,
     pub min_ram_mb: u64,
     pub max_ram_mb: u64,
     pub resolved_gc: String,
@@ -127,10 +128,9 @@ pub fn build_jvm_plan(cfg: &LauncherConfig, hw: &HostHardware, ipc_token: &str) 
         }
     }
 
-    // Spica Brain IPC & Native bridge system properties
+    // Spica Brain IPC & Native bridge system properties (Y7: IPC token is passed via child env SPICA_IPC_TOKEN, never CLI args)
     args.push(format!("-Dspica.ipc.host={}", cfg.brain.ipc_host));
     args.push(format!("-Dspica.ipc.port={}", cfg.brain.ipc_port));
-    args.push(format!("-Dspica.ipc.token={}", ipc_token));
     args.push(format!("-Dspica.native.threads={}", resolved_native_threads));
     if !cfg.native.native_dir.trim().is_empty() {
         args.push(format!("-Dspica.native.dir={}", cfg.native.native_dir));
@@ -155,6 +155,7 @@ pub fn build_jvm_plan(cfg: &LauncherConfig, hw: &HostHardware, ipc_token: &str) 
     JvmPlan {
         java_bin: cfg.server.java_bin.clone(),
         args,
+        ipc_token: ipc_token.to_string(),
         min_ram_mb,
         max_ram_mb,
         resolved_gc,
@@ -362,9 +363,11 @@ mod tests {
         assert_eq!(plan.max_ram_mb, 8192);
         assert!(plan.args.contains(&"-XX:+UseZGC".to_string()));
         assert!(plan.args.contains(&"-XX:+ZGenerational".to_string()));
-        assert!(plan
-            .args
-            .contains(&"-Dspica.ipc.token=0123456789abcdef0123456789abcdef".to_string()));
+        assert_eq!(plan.ipc_token, "0123456789abcdef0123456789abcdef");
+        assert!(
+            !plan.args.iter().any(|a| a.contains("ipc.token")),
+            "IPC token must never appear in JVM CLI args"
+        );
     }
 
     #[test]

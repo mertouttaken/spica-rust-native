@@ -1,8 +1,16 @@
 //! Pure C ABI exports for Java 22+ Project Panama (FFM), C/C++, or external tooling.
+//!
+//! # Safety Contract (All Exports)
+//! - All non-zero-length pointer spans are validated BEFORE any Rust slice is constructed:
+//!   null check, `align_of::<T>()` alignment check, `count * size_of::<T>() <= isize::MAX`,
+//!   address wraparound check, and zero read-write / write-write aliasing (`SpanValidator`).
+//! - Callers must guarantee backing allocations remain valid, initialized for `T`, and
+//!   exclusively owned (for mutable outputs) for the full duration of the FFI call.
+//! - Every export wraps execution in `catch_unwind` and returns `-1` on any contract violation.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::slice;
 
+use crate::ffi_guard::SpanValidator;
 use crate::{block_diff, farm_governor, governor, kernels, noise};
 
 /// Initialize the Rayon worker thread pool. Pass `0` to auto-select optimal thread count.
@@ -18,8 +26,10 @@ pub extern "C" fn spica_init_pool(num_threads: i32) -> i32 {
 /// Compute batch entity collisions via raw C pointers (zero-copy).
 ///
 /// # Safety
-/// All pointers must be valid, non-null, properly aligned for `f32`/`i32`, and point to at least `count` elements.
+/// All pointers must be valid, non-null, properly aligned for `f32`/`i32`, non-overlapping on
+/// writable outputs, and point to at least `count` elements for the duration of the call.
 #[no_mangle]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn spica_compute_collisions(
     count: usize,
     xs: *const f32,
@@ -37,27 +47,26 @@ pub unsafe extern "C" fn spica_compute_collisions(
     if count == 0 {
         return 0;
     }
-    if xs.is_null()
-        || ys.is_null()
-        || zs.is_null()
-        || radii.is_null()
-        || out_push_x.is_null()
-        || out_push_y.is_null()
-        || out_push_z.is_null()
-        || out_neighbor_counts.is_null()
-    {
-        return -1;
-    }
 
     catch_unwind(AssertUnwindSafe(|| {
-        let xs_s = slice::from_raw_parts(xs, count);
-        let ys_s = slice::from_raw_parts(ys, count);
-        let zs_s = slice::from_raw_parts(zs, count);
-        let rad_s = slice::from_raw_parts(radii, count);
-        let opx = slice::from_raw_parts_mut(out_push_x, count);
-        let opy = slice::from_raw_parts_mut(out_push_y, count);
-        let opz = slice::from_raw_parts_mut(out_push_z, count);
-        let oc = slice::from_raw_parts_mut(out_neighbor_counts, count);
+        let mut guard = SpanValidator::new();
+        let Ok(xs_r) = guard.register_read(xs, count, None) else { return -1; };
+        let Ok(ys_r) = guard.register_read(ys, count, None) else { return -1; };
+        let Ok(zs_r) = guard.register_read(zs, count, None) else { return -1; };
+        let Ok(rad_r) = guard.register_read(radii, count, None) else { return -1; };
+        let Ok(mut opx_w) = guard.register_write(out_push_x, count, None) else { return -1; };
+        let Ok(mut opy_w) = guard.register_write(out_push_y, count, None) else { return -1; };
+        let Ok(mut opz_w) = guard.register_write(out_push_z, count, None) else { return -1; };
+        let Ok(mut oc_w) = guard.register_write(out_neighbor_counts, count, None) else { return -1; };
+
+        let xs_s = xs_r.as_slice();
+        let ys_s = ys_r.as_slice();
+        let zs_s = zs_r.as_slice();
+        let rad_s = rad_r.as_slice();
+        let opx = opx_w.as_mut_slice();
+        let opy = opy_w.as_mut_slice();
+        let opz = opz_w.as_mut_slice();
+        let oc = oc_w.as_mut_slice();
 
         crate::run_in_pool(|| {
             kernels::compute_entity_collisions(
@@ -78,11 +87,11 @@ pub unsafe extern "C" fn spica_compute_collisions(
     .unwrap_or(-1)
 }
 
-
 /// Compute batch AI nearest-target + LOD tiers via raw C pointers (zero-copy).
 ///
 /// # Safety
-/// All mob pointers must have `mob_count` elements; target pointers must have `target_count` elements.
+/// All mob pointers must have `mob_count` elements; target pointers must have `target_count`
+/// elements; all output spans must be non-overlapping and exclusively writable.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn spica_compute_ai_targets(
@@ -106,41 +115,37 @@ pub unsafe extern "C" fn spica_compute_ai_targets(
     if mob_count == 0 {
         return 0;
     }
-    if mob_x.is_null()
-        || mob_y.is_null()
-        || mob_z.is_null()
-        || out_nearest_idx.is_null()
-        || out_dist_sq.is_null()
-        || out_dir_x.is_null()
-        || out_dir_y.is_null()
-        || out_dir_z.is_null()
-        || out_lod_tier.is_null()
-        || (target_count > 0 && (target_x.is_null() || target_y.is_null() || target_z.is_null()))
-    {
+    if mob_count > i32::MAX as usize || target_count > i32::MAX as usize {
         return -1;
     }
 
     catch_unwind(AssertUnwindSafe(|| {
-        let mx = slice::from_raw_parts(mob_x, mob_count);
-        let my = slice::from_raw_parts(mob_y, mob_count);
-        let mz = slice::from_raw_parts(mob_z, mob_count);
+        let mut guard = SpanValidator::new();
+        let Ok(mx_r) = guard.register_read(mob_x, mob_count, None) else { return -1; };
+        let Ok(my_r) = guard.register_read(mob_y, mob_count, None) else { return -1; };
+        let Ok(mz_r) = guard.register_read(mob_z, mob_count, None) else { return -1; };
+        let Ok(tx_r) = guard.register_read(target_x, target_count, None) else { return -1; };
+        let Ok(ty_r) = guard.register_read(target_y, target_count, None) else { return -1; };
+        let Ok(tz_r) = guard.register_read(target_z, target_count, None) else { return -1; };
+        let Ok(mut oi_w) = guard.register_write(out_nearest_idx, mob_count, None) else { return -1; };
+        let Ok(mut od_w) = guard.register_write(out_dist_sq, mob_count, None) else { return -1; };
+        let Ok(mut odx_w) = guard.register_write(out_dir_x, mob_count, None) else { return -1; };
+        let Ok(mut ody_w) = guard.register_write(out_dir_y, mob_count, None) else { return -1; };
+        let Ok(mut odz_w) = guard.register_write(out_dir_z, mob_count, None) else { return -1; };
+        let Ok(mut ot_w) = guard.register_write(out_lod_tier, mob_count, None) else { return -1; };
 
-        let (tx, ty, tz): (&[f32], &[f32], &[f32]) = if target_count > 0 {
-            (
-                slice::from_raw_parts(target_x, target_count),
-                slice::from_raw_parts(target_y, target_count),
-                slice::from_raw_parts(target_z, target_count),
-            )
-        } else {
-            (&[], &[], &[])
-        };
-
-        let oi = slice::from_raw_parts_mut(out_nearest_idx, mob_count);
-        let od = slice::from_raw_parts_mut(out_dist_sq, mob_count);
-        let odx = slice::from_raw_parts_mut(out_dir_x, mob_count);
-        let ody = slice::from_raw_parts_mut(out_dir_y, mob_count);
-        let odz = slice::from_raw_parts_mut(out_dir_z, mob_count);
-        let ot = slice::from_raw_parts_mut(out_lod_tier, mob_count);
+        let mx = mx_r.as_slice();
+        let my = my_r.as_slice();
+        let mz = mz_r.as_slice();
+        let tx = tx_r.as_slice();
+        let ty = ty_r.as_slice();
+        let tz = tz_r.as_slice();
+        let oi = oi_w.as_mut_slice();
+        let od = od_w.as_mut_slice();
+        let odx = odx_w.as_mut_slice();
+        let ody = ody_w.as_mut_slice();
+        let odz = odz_w.as_mut_slice();
+        let ot = ot_w.as_mut_slice();
 
         crate::run_in_pool(|| {
             kernels::compute_ai_targets(
@@ -164,7 +169,6 @@ pub unsafe extern "C" fn spica_compute_ai_targets(
     .unwrap_or(-1)
 }
 
-
 /// Evaluate the adaptive MSPT/TPS Governor via raw C pointers.
 ///
 /// Writes:
@@ -174,8 +178,8 @@ pub unsafe extern "C" fn spica_compute_ai_targets(
 /// Returns `state_code`, or `-1` on error.
 ///
 /// # Safety
-/// `out_int_state` must be non-null, aligned, and writable for at least 4 `i32` elements;
-/// `out_float_params` must be non-null, aligned, and writable for at least 4 `f32` elements.
+/// `out_int_state` and `out_float_params` must be non-null, aligned, non-overlapping, and
+/// writable for at least 4 elements each.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn spica_evaluate_governor(
@@ -192,13 +196,13 @@ pub unsafe extern "C" fn spica_evaluate_governor(
     out_int_state: *mut i32,
     out_float_params: *mut f32,
 ) -> i32 {
-    if out_int_state.is_null() || out_float_params.is_null() {
-        return -1;
-    }
-
     catch_unwind(AssertUnwindSafe(|| {
-        let out_ints = slice::from_raw_parts_mut(out_int_state, 4);
-        let out_floats = slice::from_raw_parts_mut(out_float_params, 4);
+        let mut guard = SpanValidator::new();
+        let Ok(mut oi_w) = guard.register_write(out_int_state, 4, None) else { return -1; };
+        let Ok(mut of_w) = guard.register_write(out_float_params, 4, None) else { return -1; };
+
+        let out_ints = oi_w.as_mut_slice();
+        let out_floats = of_w.as_mut_slice();
 
         let result = governor::evaluate_governor(
             current_mspt,
@@ -233,9 +237,9 @@ pub unsafe extern "C" fn spica_evaluate_governor(
 /// Returns the number of throttled entities (`out_actions[i] != ACTION_NORMAL`), or `-1` on error.
 ///
 /// # Safety
-/// All entity pointers must be non-null, properly aligned for `f32`/`i32`, and valid for
-/// `entity_count` elements. If `player_count > 0`, all player pointers must be non-null,
-/// aligned, and valid for `player_count` elements.
+/// All entity pointers must be non-null, properly aligned, and valid for `entity_count` elements.
+/// If `player_count > 0`, all player pointers must be valid for `player_count` elements.
+/// Writable outputs must not overlap any input or each other.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn spica_evaluate_farm_throttling(
@@ -261,36 +265,33 @@ pub unsafe extern "C" fn spica_evaluate_farm_throttling(
     if entity_count == 0 {
         return 0;
     }
-    if xs.is_null()
-        || ys.is_null()
-        || zs.is_null()
-        || entity_flags.is_null()
-        || out_actions.is_null()
-        || out_neighbor_counts.is_null()
-        || (player_count > 0
-            && (player_xs.is_null() || player_ys.is_null() || player_zs.is_null()))
-    {
+    if entity_count > i32::MAX as usize || player_count > i32::MAX as usize {
         return -1;
     }
 
     catch_unwind(AssertUnwindSafe(|| {
-        let xs_s = slice::from_raw_parts(xs, entity_count);
-        let ys_s = slice::from_raw_parts(ys, entity_count);
-        let zs_s = slice::from_raw_parts(zs, entity_count);
-        let flags_s = slice::from_raw_parts(entity_flags, entity_count);
-
-        let (pxs_s, pys_s, pzs_s): (&[f32], &[f32], &[f32]) = if player_count > 0 {
-            (
-                slice::from_raw_parts(player_xs, player_count),
-                slice::from_raw_parts(player_ys, player_count),
-                slice::from_raw_parts(player_zs, player_count),
-            )
-        } else {
-            (&[], &[], &[])
+        let mut guard = SpanValidator::new();
+        let Ok(xs_r) = guard.register_read(xs, entity_count, None) else { return -1; };
+        let Ok(ys_r) = guard.register_read(ys, entity_count, None) else { return -1; };
+        let Ok(zs_r) = guard.register_read(zs, entity_count, None) else { return -1; };
+        let Ok(fl_r) = guard.register_read(entity_flags, entity_count, None) else { return -1; };
+        let Ok(px_r) = guard.register_read(player_xs, player_count, None) else { return -1; };
+        let Ok(py_r) = guard.register_read(player_ys, player_count, None) else { return -1; };
+        let Ok(pz_r) = guard.register_read(player_zs, player_count, None) else { return -1; };
+        let Ok(mut oa_w) = guard.register_write(out_actions, entity_count, None) else { return -1; };
+        let Ok(mut on_w) = guard.register_write(out_neighbor_counts, entity_count, None) else {
+            return -1;
         };
 
-        let oa = slice::from_raw_parts_mut(out_actions, entity_count);
-        let on = slice::from_raw_parts_mut(out_neighbor_counts, entity_count);
+        let xs_s = xs_r.as_slice();
+        let ys_s = ys_r.as_slice();
+        let zs_s = zs_r.as_slice();
+        let flags_s = fl_r.as_slice();
+        let pxs_s = px_r.as_slice();
+        let pys_s = py_r.as_slice();
+        let pzs_s = pz_r.as_slice();
+        let oa = oa_w.as_mut_slice();
+        let on = on_w.as_mut_slice();
 
         crate::run_in_pool(|| {
             farm_governor::evaluate_farm_throttling(
@@ -316,14 +317,13 @@ pub unsafe extern "C" fn spica_evaluate_farm_throttling(
     .unwrap_or(-1)
 }
 
-
 /// Generate deterministic parallel 2D FBM gradient noise via raw C pointers (zero-copy).
 ///
 /// Returns the number of generated samples (`width * depth`), or `-1` on error.
 ///
 /// # Safety
-/// `out_heights` must be non-null, properly aligned for `f32`, and writable for at least
-/// `width * depth` elements.
+/// `out_heights` must be non-null, properly aligned for `f32`, and exclusively writable for at
+/// least `width * depth` elements (`width * depth * 4 <= isize::MAX`).
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn spica_generate_noise_2d(
@@ -345,12 +345,15 @@ pub unsafe extern "C" fn spica_generate_noise_2d(
     let Some(total) = width.checked_mul(depth) else {
         return -1;
     };
-    if out_heights.is_null() || (out_heights as usize) % std::mem::align_of::<f32>() != 0 {
+    if total > i32::MAX as usize {
         return -1;
     }
 
     catch_unwind(AssertUnwindSafe(|| {
-        let out = slice::from_raw_parts_mut(out_heights, total);
+        let mut guard = SpanValidator::new();
+        let Ok(mut out_w) = guard.register_write(out_heights, total, None) else { return -1; };
+        let out = out_w.as_mut_slice();
+
         crate::run_in_pool(|| {
             noise::generate_noise_2d(
                 origin_x,
@@ -372,12 +375,17 @@ pub unsafe extern "C" fn spica_generate_noise_2d(
 
 /// Compute a parallel 3D arena/region block diff in YZX layout via raw C pointers (zero-copy).
 ///
-/// Returns total differing blocks (count-only mode when `max_diffs == 0`), or `-1` on error.
+/// Return value semantics:
+/// - Count-only mode (`max_diffs == 0`): returns the total number of differing blocks.
+/// - Extraction mode (`max_diffs > 0`): writes up to `max_diffs` entries and returns the number
+///   of entries written.
+/// - Returns `-1` on contract violation (null, unaligned, overflow, or aliasing buffers).
 ///
 /// # Safety
 /// `current_blocks` and `target_blocks` must be valid, non-null, aligned for `i32`, and have at
 /// least `width * height * depth` elements. When `max_diffs > 0`, all four output pointers must
-/// be non-null, aligned for `i32`, and writable for at least `max_diffs` elements.
+/// be non-null, aligned for `i32`, mutually non-overlapping (and non-overlapping with inputs),
+/// and writable for at least `max_diffs` elements.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn spica_compute_block_diff(
@@ -404,40 +412,22 @@ pub unsafe extern "C" fn spica_compute_block_diff(
     if total > block_diff::MAX_VOLUME_BLOCKS {
         return -1;
     }
-    let align = std::mem::align_of::<i32>();
-    if current_blocks.is_null()
-        || target_blocks.is_null()
-        || (current_blocks as usize) % align != 0
-        || (target_blocks as usize) % align != 0
-    {
-        return -1;
-    }
-    if max_diffs > 0
-        && (out_rel_x.is_null()
-            || out_rel_y.is_null()
-            || out_rel_z.is_null()
-            || out_new_block_id.is_null()
-            || (out_rel_x as usize) % align != 0
-            || (out_rel_y as usize) % align != 0
-            || (out_rel_z as usize) % align != 0
-            || (out_new_block_id as usize) % align != 0)
-    {
-        return -1;
-    }
 
     catch_unwind(AssertUnwindSafe(|| {
-        let cur = slice::from_raw_parts(current_blocks, total);
-        let tgt = slice::from_raw_parts(target_blocks, total);
-        let (rx, ry, rz, nid) = if max_diffs > 0 {
-            (
-                slice::from_raw_parts_mut(out_rel_x, max_diffs),
-                slice::from_raw_parts_mut(out_rel_y, max_diffs),
-                slice::from_raw_parts_mut(out_rel_z, max_diffs),
-                slice::from_raw_parts_mut(out_new_block_id, max_diffs),
-            )
-        } else {
-            (&mut [][..], &mut [][..], &mut [][..], &mut [][..])
-        };
+        let mut guard = SpanValidator::new();
+        let Ok(cur_r) = guard.register_read(current_blocks, total, None) else { return -1; };
+        let Ok(tgt_r) = guard.register_read(target_blocks, total, None) else { return -1; };
+        let Ok(mut rx_w) = guard.register_write(out_rel_x, max_diffs, None) else { return -1; };
+        let Ok(mut ry_w) = guard.register_write(out_rel_y, max_diffs, None) else { return -1; };
+        let Ok(mut rz_w) = guard.register_write(out_rel_z, max_diffs, None) else { return -1; };
+        let Ok(mut nid_w) = guard.register_write(out_new_block_id, max_diffs, None) else { return -1; };
+
+        let cur = cur_r.as_slice();
+        let tgt = tgt_r.as_slice();
+        let rx = rx_w.as_mut_slice();
+        let ry = ry_w.as_mut_slice();
+        let rz = rz_w.as_mut_slice();
+        let nid = nid_w.as_mut_slice();
 
         crate::run_in_pool(|| {
             block_diff::compute_block_diff(width, height, depth, cur, tgt, rx, ry, rz, nid)
@@ -446,3 +436,79 @@ pub unsafe extern "C" fn spica_compute_block_diff(
     .unwrap_or(-1)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_c_abi_rejects_aliasing_and_unaligned_pointers() {
+        let mut a = [1.0f32; 8];
+        let mut b = [2.0f32; 8];
+        let mut c = [3.0f32; 8];
+        let r = [0.5f32; 8];
+        let mut out_c = [0i32; 8];
+
+        // Aliasing: out_push_x points to same buffer as xs
+        let res_alias = unsafe {
+            spica_compute_collisions(
+                8,
+                a.as_ptr(),
+                b.as_ptr(),
+                c.as_ptr(),
+                r.as_ptr(),
+                1.5,
+                0.5,
+                0.4,
+                a.as_mut_ptr(),
+                b.as_mut_ptr(),
+                c.as_mut_ptr(),
+                out_c.as_mut_ptr(),
+            )
+        };
+        assert_eq!(res_alias, -1);
+
+        // Unaligned pointer for governor output
+        let mut raw = [0u8; 32];
+        let bad_ints = unsafe { raw.as_mut_ptr().add(1) } as *mut i32;
+        let mut good_floats = [0.0f32; 4];
+        let res_unaligned = unsafe {
+            spica_evaluate_governor(
+                20.0,
+                20.0,
+                100,
+                5,
+                32.0,
+                56.0,
+                4,
+                10,
+                3,
+                8,
+                bad_ints,
+                good_floats.as_mut_ptr(),
+            )
+        };
+        assert_eq!(res_unaligned, -1);
+
+        // Aliasing outputs in block_diff
+        let cur = [1i32; 8];
+        let tgt = [2i32; 8];
+        let mut ox = [0i32; 8];
+        let mut oy = [0i32; 8];
+        let mut oz = [0i32; 8];
+        let res_bd_alias = unsafe {
+            spica_compute_block_diff(
+                2,
+                2,
+                2,
+                cur.as_ptr(),
+                tgt.as_ptr(),
+                8,
+                ox.as_mut_ptr(),
+                oy.as_mut_ptr(),
+                oz.as_mut_ptr(),
+                ox.as_mut_ptr(), // aliases ox!
+            )
+        };
+        assert_eq!(res_bd_alias, -1);
+    }
+}

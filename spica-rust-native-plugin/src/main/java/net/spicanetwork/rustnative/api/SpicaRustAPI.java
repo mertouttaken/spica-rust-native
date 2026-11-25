@@ -6,6 +6,7 @@ import net.spicanetwork.rustnative.nativebridge.NativeLoader;
 import net.spicanetwork.rustnative.nativebridge.RustNative;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Locale;
 
 /**
@@ -48,12 +49,14 @@ public final class SpicaRustAPI {
         if (entityCount <= 0) {
             return 0L;
         }
-        return RustNative.nativeComputeCollisions(
-            entityCount,
-            arena.xBuf, arena.yBuf, arena.zBuf, arena.radiusBuf,
-            cellSize, pushStrength, maxPush,
-            arena.outXBuf, arena.outYBuf, arena.outZBuf, arena.outIntABuf
-        );
+        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
+            return RustNative.nativeComputeCollisions(
+                entityCount,
+                arena.xBuf, arena.yBuf, arena.zBuf, arena.radiusBuf,
+                cellSize, pushStrength, maxPush,
+                arena.outXBuf, arena.outYBuf, arena.outZBuf, arena.outIntABuf
+            );
+        }
     }
 
     /**
@@ -77,16 +80,18 @@ public final class SpicaRustAPI {
         if (mobCount <= 0) {
             return 0;
         }
-        return RustNative.nativeComputeAiTargets(
-            mobCount,
-            arena.xBuf, arena.yBuf, arena.zBuf,
-            targetCount,
-            arena.targetXBuf, arena.targetYBuf, arena.targetZBuf,
-            fullRange, reducedRange,
-            arena.outIntABuf, arena.outDistSqBuf,
-            arena.outXBuf, arena.outYBuf, arena.outZBuf,
-            arena.outIntBBuf
-        );
+        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
+            return RustNative.nativeComputeAiTargets(
+                mobCount,
+                arena.xBuf, arena.yBuf, arena.zBuf,
+                targetCount,
+                arena.targetXBuf, arena.targetYBuf, arena.targetZBuf,
+                fullRange, reducedRange,
+                arena.outIntABuf, arena.outDistSqBuf,
+                arena.outXBuf, arena.outYBuf, arena.outZBuf,
+                arena.outIntBBuf
+            );
+        }
     }
 
     /**
@@ -112,15 +117,17 @@ public final class SpicaRustAPI {
         if (entityCount <= 0) {
             return 0;
         }
-        return RustNative.nativeComputeBoids(
-            entityCount,
-            arena.xBuf, arena.yBuf, arena.zBuf,
-            arena.vxBuf, arena.vyBuf, arena.vzBuf,
-            goalX, goalY, goalZ,
-            perceptionRadius,
-            sepWeight, alignWeight, cohesionWeight, goalWeight, maxForce,
-            arena.outXBuf, arena.outYBuf, arena.outZBuf
-        );
+        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
+            return RustNative.nativeComputeBoids(
+                entityCount,
+                arena.xBuf, arena.yBuf, arena.zBuf,
+                arena.vxBuf, arena.vyBuf, arena.vzBuf,
+                goalX, goalY, goalZ,
+                perceptionRadius,
+                sepWeight, alignWeight, cohesionWeight, goalWeight, maxForce,
+                arena.outXBuf, arena.outYBuf, arena.outZBuf
+            );
+        }
     }
 
     /**
@@ -140,13 +147,15 @@ public final class SpicaRustAPI {
         if (entityCount <= 0 || maxResults <= 0) {
             return 0;
         }
-        return RustNative.nativeQueryRadius(
-            entityCount,
-            arena.xBuf, arena.yBuf, arena.zBuf,
-            qx, qy, qz, radius,
-            Math.min(maxResults, arena.getEntityCapacity()),
-            arena.outIntABuf
-        );
+        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
+            return RustNative.nativeQueryRadius(
+                entityCount,
+                arena.xBuf, arena.yBuf, arena.zBuf,
+                qx, qy, qz, radius,
+                Math.min(maxResults, arena.getEntityCapacity()),
+                arena.outIntABuf
+            );
+        }
     }
 
     /**
@@ -167,17 +176,19 @@ public final class SpicaRustAPI {
         }
         int clampedCount = Math.min(entityCount, arena.getEntityCapacity());
         int clampedMax = Math.min(maxHotChunks, EntityBatchArena.MAX_HOT_CHUNKS);
-        return RustNative.nativeAnalyzeChunks(
-            clampedCount,
-            arena.xBuf,
-            arena.zBuf,
-            arena.outIntABuf,
-            clampedMax,
-            arena.chunkXBuf,
-            arena.chunkZBuf,
-            arena.chunkCountBuf,
-            arena.chunkCrowdedBuf
-        );
+        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
+            return RustNative.nativeAnalyzeChunks(
+                clampedCount,
+                arena.xBuf,
+                arena.zBuf,
+                arena.outIntABuf,
+                clampedMax,
+                arena.chunkXBuf,
+                arena.chunkZBuf,
+                arena.chunkCountBuf,
+                arena.chunkCrowdedBuf
+            );
+        }
     }
 
     /**
@@ -199,19 +210,21 @@ public final class SpicaRustAPI {
         }
         int clampedItems = Math.min(itemCount, arena.getEntityCapacity());
         int clampedPairs = Math.min(maxPairs, arena.getEntityCapacity());
-        return RustNative.nativePlanItemMerges(
-            clampedItems,
-            arena.xBuf,
-            arena.yBuf,
-            arena.zBuf,
-            arena.typeIdBuf,
-            arena.amountBuf,
-            maxStackSize,
-            mergeRadius,
-            clampedPairs,
-            arena.outIntABuf,
-            arena.outIntBBuf
-        );
+        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
+            return RustNative.nativePlanItemMerges(
+                clampedItems,
+                arena.xBuf,
+                arena.yBuf,
+                arena.zBuf,
+                arena.typeIdBuf,
+                arena.amountBuf,
+                maxStackSize,
+                mergeRadius,
+                clampedPairs,
+                arena.outIntABuf,
+                arena.outIntBBuf
+            );
+        }
     }
 
     /**
@@ -244,50 +257,65 @@ public final class SpicaRustAPI {
             ? baseHibernateRange
             : Math.max(56.0f, safeBaseFull + 8.0f);
 
-        int ret = RustNative.nativeEvaluateGovernor(
-            safeCurrentMspt,
-            safeEwmaMspt,
-            Math.max(0, loadedEntities),
-            Math.max(0, onlinePlayers),
-            safeBaseFull,
-            safeBaseHib,
-            safeMinView,
-            safeMaxView,
-            safeMinSim,
-            safeMaxSim,
-            arena.govIntBuf,
-            arena.govFloatBuf
-        );
+        int ret;
+        int stateCode;
+        int viewDist;
+        int simDist;
+        boolean itemMergeEnabled;
+        float nextEwma;
+        float fullRange;
+        float hibRange;
+        float mergeRadius;
 
-        if (ret < 0) {
-            return BrainDirective.safeDefault(
+        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
+            ret = RustNative.nativeEvaluateGovernor(
+                safeCurrentMspt,
                 safeEwmaMspt,
-                safeMaxView,
-                safeMaxSim,
+                Math.max(0, loadedEntities),
+                Math.max(0, onlinePlayers),
                 safeBaseFull,
                 safeBaseHib,
-                "In-process Rust governor fallback error code=" + ret
+                safeMinView,
+                safeMaxView,
+                safeMinSim,
+                safeMaxSim,
+                arena.govIntBuf,
+                arena.govFloatBuf
             );
+
+            if (ret < 0) {
+                return BrainDirective.safeDefault(
+                    safeEwmaMspt,
+                    safeMaxView,
+                    safeMaxSim,
+                    safeBaseFull,
+                    safeBaseHib,
+                    "In-process Rust governor fallback error code=" + ret
+                );
+            }
+
+            stateCode = Math.clamp(arena.govInt.get(0), BrainDirective.STATE_GREEN, BrainDirective.STATE_EMERGENCY);
+            viewDist = Math.clamp(arena.govInt.get(1), safeMinView, safeMaxView);
+            simDist = Math.clamp(arena.govInt.get(2), safeMinSim, safeMaxSim);
+            itemMergeEnabled = arena.govInt.get(3) != 0;
+
+            // Slot layout matches Rust jni_bridge.rs / c_abi.rs:
+            // out_floats[0..4] = [full_ai_range, hibernate_range, merge_radius, ewma_mspt]
+            fullRange = arena.govFloat.get(0);
+            hibRange = arena.govFloat.get(1);
+            mergeRadius = arena.govFloat.get(2);
+            nextEwma = arena.govFloat.get(3);
         }
 
-        int stateCode = Math.clamp(arena.govInt.get(0), BrainDirective.STATE_GREEN, BrainDirective.STATE_EMERGENCY);
-        int viewDist = Math.clamp(arena.govInt.get(1), safeMinView, safeMaxView);
-        int simDist = Math.clamp(arena.govInt.get(2), safeMinSim, safeMaxSim);
-        boolean itemMergeEnabled = arena.govInt.get(3) != 0;
-
-        float nextEwma = arena.govFloat.get(0);
         if (!Float.isFinite(nextEwma) || nextEwma < 0f) {
             nextEwma = safeCurrentMspt;
         }
-        float fullRange = arena.govFloat.get(1);
         if (!Float.isFinite(fullRange) || fullRange <= 0f) {
             fullRange = safeBaseFull;
         }
-        float hibRange = arena.govFloat.get(2);
         if (!Float.isFinite(hibRange) || hibRange < fullRange) {
             hibRange = Math.max(safeBaseHib, fullRange + 4.0f);
         }
-        float mergeRadius = arena.govFloat.get(3);
         if (!Float.isFinite(mergeRadius) || mergeRadius <= 0f) {
             mergeRadius = 3.5f;
         }
@@ -349,26 +377,28 @@ public final class SpicaRustAPI {
         int safeVillagerCrowd = Math.max(1, villagerCrowdThreshold);
         int safeState = Math.clamp(brainStateCode, BrainDirective.STATE_GREEN, BrainDirective.STATE_EMERGENCY);
 
-        return RustNative.nativeEvaluateFarmThrottling(
-            clampedEntities,
-            arena.xBuf,
-            arena.yBuf,
-            arena.zBuf,
-            arena.flagsBuf,
-            clampedPlayers,
-            arena.targetXBuf,
-            arena.targetYBuf,
-            arena.targetZBuf,
-            safeCrowdRadius,
-            safeMild,
-            safeSevere,
-            safeChunkLimit,
-            safeWakeRange,
-            safeVillagerCrowd,
-            safeState,
-            arena.outIntABuf,
-            arena.outIntBBuf
-        );
+        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
+            return RustNative.nativeEvaluateFarmThrottling(
+                clampedEntities,
+                arena.xBuf,
+                arena.yBuf,
+                arena.zBuf,
+                arena.flagsBuf,
+                clampedPlayers,
+                arena.targetXBuf,
+                arena.targetYBuf,
+                arena.targetZBuf,
+                safeCrowdRadius,
+                safeMild,
+                safeSevere,
+                safeChunkLimit,
+                safeWakeRange,
+                safeVillagerCrowd,
+                safeState,
+                arena.outIntABuf,
+                arena.outIntBBuf
+            );
+        }
     }
 
     /**
@@ -396,22 +426,24 @@ public final class SpicaRustAPI {
             ? baseMaxElytraSpeed
             : 1.8f;
 
-        return RustNative.nativeEvaluatePlayerSurges(
-            clampedPlayers,
-            arena.xBuf,
-            arena.yBuf,
-            arena.zBuf,
-            arena.vxBuf,
-            arena.vyBuf,
-            arena.vzBuf,
-            arena.flagsBuf,
-            safeState,
-            safeBaseSpeed,
-            arena.outIntABuf,
-            arena.outXBuf,
-            arena.outYBuf,
-            arena.outZBuf
-        );
+        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
+            return RustNative.nativeEvaluatePlayerSurges(
+                clampedPlayers,
+                arena.xBuf,
+                arena.yBuf,
+                arena.zBuf,
+                arena.vxBuf,
+                arena.vyBuf,
+                arena.vzBuf,
+                arena.flagsBuf,
+                safeState,
+                safeBaseSpeed,
+                arena.outIntABuf,
+                arena.outXBuf,
+                arena.outYBuf,
+                arena.outZBuf
+            );
+        }
     }
 
     /**
@@ -434,12 +466,10 @@ public final class SpicaRustAPI {
         if (width <= 0 || depth <= 0) {
             return 0;
         }
-        if (costGrid == null || outDist == null || outDirX == null || outDirZ == null) {
-            throw new IllegalArgumentException("Flow-field ByteBuffers must not be null.");
-        }
-        if (!costGrid.isDirect() || !outDist.isDirect() || !outDirX.isDirect() || !outDirZ.isDirect()) {
-            throw new IllegalArgumentException("Flow-field ByteBuffers must be direct (ByteBuffer.allocateDirect).");
-        }
+        requireDirectBuffer(costGrid, "costGrid");
+        requireDirectNativeBuffer(outDist, "outDist", true);
+        requireDirectNativeBuffer(outDirX, "outDirX", true);
+        requireDirectNativeBuffer(outDirZ, "outDirZ", true);
         long cells = (long) width * (long) depth;
         if (cells > Integer.MAX_VALUE / Float.BYTES) {
             throw new IllegalArgumentException("Flow-field grid dimensions overflow buffer limits.");
@@ -485,9 +515,7 @@ public final class SpicaRustAPI {
         if (width <= 0 || depth <= 0) {
             return 0;
         }
-        if (outHeights == null || !outHeights.isDirect()) {
-            throw new IllegalArgumentException("outHeights must be a non-null direct ByteBuffer.");
-        }
+        requireDirectNativeBuffer(outHeights, "outHeights", true);
         long cells = (long) width * (long) depth;
         if (cells > Integer.MAX_VALUE / Float.BYTES || outHeights.capacity() < cells * Float.BYTES) {
             throw new IllegalArgumentException("outHeights buffer is smaller than width * depth * 4 bytes.");
@@ -555,21 +583,24 @@ public final class SpicaRustAPI {
             return 0;
         }
 
-        requireDirectBuffer(mobXs, "mobXs");
-        requireDirectBuffer(mobYs, "mobYs");
-        requireDirectBuffer(mobZs, "mobZs");
-        requireDirectBuffer(mobFlags, "mobFlags");
-        requireDirectBuffer(playerXs, "playerXs");
-        requireDirectBuffer(playerYs, "playerYs");
-        requireDirectBuffer(playerZs, "playerZs");
-        requireDirectBuffer(playerLookXs, "playerLookXs");
-        requireDirectBuffer(playerLookYs, "playerLookYs");
-        requireDirectBuffer(playerLookZs, "playerLookZs");
+        requireDirectNativeBuffer(mobXs, "mobXs", false);
+        requireDirectNativeBuffer(mobYs, "mobYs", false);
+        requireDirectNativeBuffer(mobZs, "mobZs", false);
+        requireDirectNativeBuffer(mobFlags, "mobFlags", false);
+        requireDirectNativeBuffer(playerXs, "playerXs", false);
+        requireDirectNativeBuffer(playerYs, "playerYs", false);
+        requireDirectNativeBuffer(playerZs, "playerZs", false);
+        requireDirectNativeBuffer(playerLookXs, "playerLookXs", false);
+        requireDirectNativeBuffer(playerLookYs, "playerLookYs", false);
+        requireDirectNativeBuffer(playerLookZs, "playerLookZs", false);
         requireDirectBuffer(visibilityBitset, "visibilityBitset");
-        requireDirectBuffer(outDeltaPlayerIdx, "outDeltaPlayerIdx");
-        requireDirectBuffer(outDeltaMobIdx, "outDeltaMobIdx");
-        requireDirectBuffer(outDeltaAction, "outDeltaAction");
-        requireDirectBuffer(outStats, "outStats");
+        if (visibilityBitset.isReadOnly()) {
+            throw new IllegalArgumentException("visibilityBitset must be a writable direct ByteBuffer.");
+        }
+        requireDirectNativeBuffer(outDeltaPlayerIdx, "outDeltaPlayerIdx", true);
+        requireDirectNativeBuffer(outDeltaMobIdx, "outDeltaMobIdx", true);
+        requireDirectNativeBuffer(outDeltaAction, "outDeltaAction", true);
+        requireDirectNativeBuffer(outStats, "outStats", true);
 
         long mobBytes = (long) mobCount * Float.BYTES;
         if (mobXs.capacity() < mobBytes
@@ -675,15 +706,15 @@ public final class SpicaRustAPI {
             return 0;
         }
 
-        requireDirectBuffer(chunkXs, "chunkXs");
-        requireDirectBuffer(chunkZs, "chunkZs");
-        requireDirectBuffer(redstonePerSec, "redstonePerSec");
-        requireDirectBuffer(hopperPerSec, "hopperPerSec");
-        requireDirectBuffer(prevHeat, "prevHeat");
-        requireDirectBuffer(outActions, "outActions");
-        requireDirectBuffer(outNewHeat, "outNewHeat");
-        requireDirectBuffer(outThrottleRatio, "outThrottleRatio");
-        requireDirectBuffer(outTopIndices, "outTopIndices");
+        requireDirectNativeBuffer(chunkXs, "chunkXs", false);
+        requireDirectNativeBuffer(chunkZs, "chunkZs", false);
+        requireDirectNativeBuffer(redstonePerSec, "redstonePerSec", false);
+        requireDirectNativeBuffer(hopperPerSec, "hopperPerSec", false);
+        requireDirectNativeBuffer(prevHeat, "prevHeat", false);
+        requireDirectNativeBuffer(outActions, "outActions", true);
+        requireDirectNativeBuffer(outNewHeat, "outNewHeat", true);
+        requireDirectNativeBuffer(outThrottleRatio, "outThrottleRatio", true);
+        requireDirectNativeBuffer(outTopIndices, "outTopIndices", true);
 
         long chunkBytes = (long) chunkCount * Integer.BYTES;
         if (chunkXs.capacity() < chunkBytes
@@ -729,8 +760,10 @@ public final class SpicaRustAPI {
      * Computes a parallel zero-copy 3D arena/region block diff in Rust (YZX layout:
      * {@code idx = (y * depth + z) * width + x}).
      *
-     * Returns the total number of differing blocks (which may exceed {@code maxDiffs} if truncated).
-     * When {@code maxDiffs == 0}, runs in count-only mode and output buffers may be empty direct buffers.
+     * Return value semantics:
+     * - Count-only mode ({@code maxDiffs == 0}): returns total differing blocks without writing outputs.
+     * - Extraction mode ({@code maxDiffs > 0}): writes up to {@code maxDiffs} entries and returns the
+     *   number of entries written (capped at {@code maxDiffs}).
      */
     public int computeBlockDiff(
         int width,
@@ -748,28 +781,34 @@ public final class SpicaRustAPI {
         if (width <= 0 || height <= 0 || depth <= 0) {
             return 0;
         }
-        long volume = (long) width * (long) height * (long) depth;
-        if (volume > 16_777_216L) {
+        if (width > 16_777_216 || height > 16_777_216 || depth > 16_777_216) {
+            throw new IllegalArgumentException("Block diff dimensions exceed 16,777,216 block safety limit.");
+        }
+        long plane = (long) width * (long) depth;
+        if (plane > 16_777_216L || plane * (long) height > 16_777_216L) {
             throw new IllegalArgumentException("Block diff volume exceeds 16,777,216 block safety limit.");
         }
-        requireDirectBuffer(currentBlocks, "currentBlocks");
-        requireDirectBuffer(targetBlocks, "targetBlocks");
+        long volume = plane * (long) height;
+        requireDirectNativeBuffer(currentBlocks, "currentBlocks", false);
+        requireDirectNativeBuffer(targetBlocks, "targetBlocks", false);
         long blockBytes = volume * Integer.BYTES;
         if (currentBlocks.capacity() < blockBytes || targetBlocks.capacity() < blockBytes) {
             throw new IllegalArgumentException("Block buffers are smaller than width * height * depth * 4 bytes.");
         }
 
         int safeMaxDiffs = Math.max(0, maxDiffs);
-        requireDirectBuffer(outRelX, "outRelX");
-        requireDirectBuffer(outRelY, "outRelY");
-        requireDirectBuffer(outRelZ, "outRelZ");
-        requireDirectBuffer(outNewBlockId, "outNewBlockId");
-        long diffBytes = (long) safeMaxDiffs * Integer.BYTES;
-        if (outRelX.capacity() < diffBytes
-            || outRelY.capacity() < diffBytes
-            || outRelZ.capacity() < diffBytes
-            || outNewBlockId.capacity() < diffBytes) {
-            throw new IllegalArgumentException("Block diff output buffers are smaller than maxDiffs * 4 bytes.");
+        if (safeMaxDiffs > 0) {
+            requireDirectNativeBuffer(outRelX, "outRelX", true);
+            requireDirectNativeBuffer(outRelY, "outRelY", true);
+            requireDirectNativeBuffer(outRelZ, "outRelZ", true);
+            requireDirectNativeBuffer(outNewBlockId, "outNewBlockId", true);
+            long diffBytes = (long) safeMaxDiffs * Integer.BYTES;
+            if (outRelX.capacity() < diffBytes
+                || outRelY.capacity() < diffBytes
+                || outRelZ.capacity() < diffBytes
+                || outNewBlockId.capacity() < diffBytes) {
+                throw new IllegalArgumentException("Block diff output buffers are smaller than maxDiffs * 4 bytes.");
+            }
         }
 
         return RustNative.nativeComputeBlockDiff(
@@ -789,6 +828,16 @@ public final class SpicaRustAPI {
     private static void requireDirectBuffer(ByteBuffer buf, String name) {
         if (buf == null || !buf.isDirect()) {
             throw new IllegalArgumentException(name + " must be a non-null direct ByteBuffer.");
+        }
+    }
+
+    private static void requireDirectNativeBuffer(ByteBuffer buf, String name, boolean writable) {
+        requireDirectBuffer(buf, name);
+        if (writable && buf.isReadOnly()) {
+            throw new IllegalArgumentException(name + " must be a writable direct ByteBuffer.");
+        }
+        if (buf.order() != ByteOrder.nativeOrder()) {
+            throw new IllegalArgumentException(name + " must use ByteOrder.nativeOrder().");
         }
     }
 

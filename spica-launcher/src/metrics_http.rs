@@ -4,11 +4,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinHandle;
 
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HTTP_REQ_BYTES: usize = 4096;
+const MAX_CONCURRENT_HTTP_CONNS: usize = 32;
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
 #[derive(Serialize)]
@@ -31,6 +33,8 @@ pub async fn start_metrics_server(
         )
     })?;
 
+    let conn_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_HTTP_CONNS));
+
     let handle = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -42,8 +46,13 @@ pub async fn start_metrics_server(
                 accept_res = listener.accept() => {
                     match accept_res {
                         Ok((stream, _peer)) => {
+                            let Ok(permit) = Arc::clone(&conn_limiter).try_acquire_owned() else {
+                                drop(stream);
+                                continue;
+                            };
                             let brain_clone = Arc::clone(&brain);
                             tokio::spawn(async move {
+                                let _permit = permit;
                                 handle_http_connection(stream, brain_clone).await;
                             });
                         }
@@ -61,18 +70,64 @@ pub async fn start_metrics_server(
 }
 
 async fn handle_http_connection(mut stream: TcpStream, brain: Arc<Mutex<BrainState>>) {
-    let mut req_buf = [0u8; MAX_HTTP_REQ_BYTES];
-    let bytes_read = match tokio::time::timeout(HTTP_READ_TIMEOUT, stream.read(&mut req_buf)).await
-    {
-        Ok(Ok(n)) if n > 0 => n,
-        _ => return,
-    };
+    // Y8: Loop until full HTTP headers (\r\n\r\n) arrive within MAX_HTTP_REQ_BYTES & HTTP_READ_TIMEOUT
+    let mut req_buf = Vec::with_capacity(512);
+    let mut chunk = [0u8; 512];
+    let read_res = tokio::time::timeout(HTTP_READ_TIMEOUT, async {
+        loop {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            if req_buf.len() + n > MAX_HTTP_REQ_BYTES {
+                return Err(tokio::io::Error::new(
+                    tokio::io::ErrorKind::InvalidData,
+                    "request_too_large",
+                ));
+            }
+            req_buf.extend_from_slice(&chunk[..n]);
+            if req_buf.windows(4).any(|w| w == b"\r\n\r\n")
+                || req_buf.windows(2).any(|w| w == b"\n\n")
+            {
+                break;
+            }
+        }
+        Ok::<(), tokio::io::Error>(())
+    })
+    .await;
 
-    let req_text = String::from_utf8_lossy(&req_buf[..bytes_read]);
+    match read_res {
+        Ok(Ok(())) if !req_buf.is_empty() => {}
+        Ok(Err(ref e)) if e.kind() == tokio::io::ErrorKind::InvalidData => {
+            let _ = write_http_response(
+                &mut stream,
+                "413 Payload Too Large",
+                "text/plain; charset=utf-8",
+                "HTTP request header exceeds 4096 bytes.\n",
+                false,
+            )
+            .await;
+            return;
+        }
+        _ => return,
+    }
+
+    let req_text = String::from_utf8_lossy(&req_buf);
     let request_line = req_text.lines().next().unwrap_or("");
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
-    let raw_target = parts.next().unwrap_or("/");
+    let raw_target = parts.next().unwrap_or("");
+    if method.is_empty() || raw_target.is_empty() {
+        let _ = write_http_response(
+            &mut stream,
+            "400 Bad Request",
+            "text/plain; charset=utf-8",
+            "Malformed HTTP request line.\n",
+            false,
+        )
+        .await;
+        return;
+    }
     let path = raw_target.split('?').next().unwrap_or("/");
 
     if method != "GET" && method != "HEAD" {
@@ -180,11 +235,21 @@ async fn write_http_response(
         content_type,
         body.len()
     );
-    stream.write_all(header.as_bytes()).await?;
-    if !head_only {
-        stream.write_all(body.as_bytes()).await?;
+    match tokio::time::timeout(HTTP_WRITE_TIMEOUT, async {
+        stream.write_all(header.as_bytes()).await?;
+        if !head_only {
+            stream.write_all(body.as_bytes()).await?;
+        }
+        stream.flush().await
+    })
+    .await
+    {
+        Ok(res) => res,
+        Err(_) => Err(tokio::io::Error::new(
+            tokio::io::ErrorKind::TimedOut,
+            "HTTP write timeout",
+        )),
     }
-    stream.flush().await
 }
 
 /// Serializes the combined live `BrainSnapshot` and 120-second `TelemetrySample` history for `/history`.

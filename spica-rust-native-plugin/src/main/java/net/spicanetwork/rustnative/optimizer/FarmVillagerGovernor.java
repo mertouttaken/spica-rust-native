@@ -24,35 +24,30 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumSet;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.Predicate;
 
 /**
  * Live Rust-powered Mob Farm & Trading-Hall Villager Governor.
  *
  * Detects overcrowded mob farms and boxed-in trading hall villagers in zero-copy native Rust
  * ({@link RustNative#nativeEvaluateFarmThrottling}), disabling entity-entity collision pushing
- * ({@link Mob#setCollidable(boolean)}) and heavy pathfinding/AI ({@link Mob#setAware(boolean)})
- * while preserving seamless player interaction, proximity wake-up, and periodic villager restock pulses.
+ * and heavy pathfinding/AI via {@link MobAiOwnershipManager} while preserving seamless player
+ * interaction, proximity wake-up, crash/unload safety, and periodic villager restock pulses.
  */
 public final class FarmVillagerGovernor implements Listener {
 
     private final SpicaRustAPI api;
+    private final MobAiOwnershipManager aiOwnership;
     private final EntityBatchArena farmArena = new EntityBatchArena(4096, 256);
     private final List<Mob> mobScratch = new ArrayList<>(4096);
     private final Location scratchLoc = new Location(null, 0.0, 0.0, 0.0);
 
-    private final Set<UUID> collisionSuppressedByUs = new HashSet<>();
-    private final Set<UUID> aiSuppressedByUs = new HashSet<>();
     private final Map<UUID, Long> interactGraceUntilMs = new HashMap<>();
     private final Set<EntityType> excludedTypes = EnumSet.noneOf(EntityType.class);
-
-    private Predicate<UUID> externalAiManagedPredicate;
 
     // Configuration
     private boolean enabled = true;
@@ -61,7 +56,7 @@ public final class FarmVillagerGovernor implements Listener {
     private int severeCrowdThreshold = 14;
     private int chunkMobLimit = 48;
 
-    private boolean villagerOptimizationEnabled = true;
+    private boolean villagerOptimizationEnabled = false;
     private float villagerWakeRange = 8.0f;
     private int villagerCrowdThreshold = 4;
     private int interactGraceSeconds = 15;
@@ -86,17 +81,10 @@ public final class FarmVillagerGovernor implements Listener {
     private int restockPulseRemainingSeconds = 0;
     private int lastBrainStateCode = BrainDirective.STATE_GREEN;
 
-    public FarmVillagerGovernor(SpicaRustAPI api) {
+    public FarmVillagerGovernor(SpicaRustAPI api, MobAiOwnershipManager aiOwnership) {
         this.api = api;
+        this.aiOwnership = aiOwnership;
         setDefaultExcludedTypes();
-    }
-
-    /**
-     * Connects an external AI-management check (e.g. {@link EntityLodOptimizer#isHibernatedByUs(UUID)})
-     * so waking a mob from farm suppression does not override distance-based LOD hibernation.
-     */
-    public void setExternalAiManagedPredicate(Predicate<UUID> externalAiManagedPredicate) {
-        this.externalAiManagedPredicate = externalAiManagedPredicate;
     }
 
     public void reloadConfig(FileConfiguration cfg) {
@@ -110,7 +98,7 @@ public final class FarmVillagerGovernor implements Listener {
         );
         this.chunkMobLimit = Math.max(8, cfg.getInt("farm-governor.chunk-mob-limit", 48));
 
-        this.villagerOptimizationEnabled = cfg.getBoolean("farm-governor.villager-optimization.enabled", true);
+        this.villagerOptimizationEnabled = cfg.getBoolean("farm-governor.villager-optimization.enabled", false);
         float rawWakeRange = (float) cfg.getDouble("farm-governor.villager-optimization.wake-range", 8.0);
         this.villagerWakeRange = Float.isFinite(rawWakeRange) ? Math.clamp(rawWakeRange, 2.0f, 48.0f) : 8.0f;
         this.villagerCrowdThreshold = Math.max(
@@ -170,35 +158,20 @@ public final class FarmVillagerGovernor implements Listener {
         }
 
         UUID id = mob.getUniqueId();
-        boolean wasAiSuppressed = aiSuppressedByUs.remove(id);
-        boolean wasCollisionSuppressed = collisionSuppressedByUs.remove(id);
+        boolean wasOwnedBySpica = aiOwnership.releaseAllForInteract(mob);
         boolean protectedMob = isProtectedMob(mob) || mob.hasMetadata("NPC");
 
-        if (wasAiSuppressed || !protectedMob) {
-            if (!mob.isAware()) {
-                mob.setAware(true);
-            }
-        }
-        if (wasCollisionSuppressed || !protectedMob) {
-            if (!mob.isCollidable()) {
-                mob.setCollidable(true);
-            }
-        }
-
-        if (interactGraceSeconds > 0 && (wasAiSuppressed || wasCollisionSuppressed || !protectedMob)) {
+        if (interactGraceSeconds > 0 && (wasOwnedBySpica || !protectedMob)) {
             interactGraceUntilMs.put(id, System.currentTimeMillis() + (interactGraceSeconds * 1000L));
         }
     }
 
     /**
-     * Prevents tracking sets from retaining dead mob UUIDs in active XP/mob grinders.
+     * Prevents interact-grace maps from retaining dead mob UUIDs in active XP/mob grinders.
      */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onEntityDeath(EntityDeathEvent event) {
-        UUID id = event.getEntity().getUniqueId();
-        collisionSuppressedByUs.remove(id);
-        aiSuppressedByUs.remove(id);
-        interactGraceUntilMs.remove(id);
+        interactGraceUntilMs.remove(event.getEntity().getUniqueId());
     }
 
     /**
@@ -332,38 +305,23 @@ public final class FarmVillagerGovernor implements Listener {
                 boolean throttleAi = (action & RustNative.ACTION_THROTTLE_AI) != 0;
                 boolean isVillager = (inputFlags & RustNative.FLAG_VILLAGER) != 0;
 
-                // Bit 0: Collision pushing suppression
+                // Bit 0: Collision pushing suppression (ownership-checked via MobAiOwnershipManager)
+                boolean colManaged;
                 if (disableCollision) {
-                    if (mob.isCollidable()) {
-                        mob.setCollidable(false);
-                        collisionSuppressedByUs.add(id);
-                    }
+                    colManaged = aiOwnership.suppressCollision(mob);
                 } else {
-                    if (collisionSuppressedByUs.remove(id) && !mob.isCollidable()) {
-                        mob.setCollidable(true);
-                    }
+                    aiOwnership.releaseCollision(mob);
+                    colManaged = false;
                 }
 
-                // Bit 1: AI throttling (coordinated cleanly with EntityLodOptimizer)
+                // Bit 1: AI throttling (coordinated cleanly via MobAiOwnershipManager)
+                boolean aiManaged;
                 if (throttleAi) {
-                    if (mob.isAware()) {
-                        mob.setAware(false);
-                        aiSuppressedByUs.add(id);
-                    } else if (externalAiManagedPredicate != null && externalAiManagedPredicate.test(id)) {
-                        aiSuppressedByUs.add(id);
-                    }
+                    aiManaged = aiOwnership.suppressAi(mob, MobAiOwnershipManager.REASON_FARM);
                 } else {
-                    if (aiSuppressedByUs.remove(id)) {
-                        boolean externallyHibernated = externalAiManagedPredicate != null
-                            && externalAiManagedPredicate.test(id);
-                        if (!externallyHibernated && !mob.isAware()) {
-                            mob.setAware(true);
-                        }
-                    }
+                    aiOwnership.releaseAi(mob, MobAiOwnershipManager.REASON_FARM);
+                    aiManaged = false;
                 }
-
-                boolean colManaged = disableCollision && collisionSuppressedByUs.contains(id);
-                boolean aiManaged = throttleAi && aiSuppressedByUs.contains(id);
 
                 if (colManaged) {
                     collisionDisabledCount++;
@@ -380,6 +338,7 @@ public final class FarmVillagerGovernor implements Listener {
             }
         }
 
+        mobScratch.clear();
         this.lastTotalMobs = totalMobs;
         this.lastFarmThrottled = farmThrottledCount;
         this.lastCollisionDisabled = collisionDisabledCount;
@@ -389,34 +348,11 @@ public final class FarmVillagerGovernor implements Listener {
     }
 
     /**
-     * Restores collision and AI awareness for every mob tracked by this governor (called on disable/reload).
+     * Restores collision and AI awareness owned by this governor (called on disable/reload).
      */
     public int restoreAll() {
-        Set<UUID> allTracked = new HashSet<>(collisionSuppressedByUs.size() + aiSuppressedByUs.size());
-        allTracked.addAll(collisionSuppressedByUs);
-        allTracked.addAll(aiSuppressedByUs);
-
-        int restored = 0;
-        for (UUID id : allTracked) {
-            Entity entity = Bukkit.getEntity(id);
-            if (entity instanceof Mob mob) {
-                boolean changed = false;
-                if (collisionSuppressedByUs.contains(id) && !mob.isCollidable()) {
-                    mob.setCollidable(true);
-                    changed = true;
-                }
-                if (aiSuppressedByUs.contains(id) && !mob.isAware()) {
-                    mob.setAware(true);
-                    changed = true;
-                }
-                if (changed) {
-                    restored++;
-                }
-            }
-        }
-
-        collisionSuppressedByUs.clear();
-        aiSuppressedByUs.clear();
+        int restored = aiOwnership.restoreAllCollisions();
+        restored += aiOwnership.restoreAllForReason(MobAiOwnershipManager.REASON_FARM);
         interactGraceUntilMs.clear();
         lastFarmThrottled = 0;
         lastCollisionDisabled = 0;
@@ -425,11 +361,10 @@ public final class FarmVillagerGovernor implements Listener {
     }
 
     /**
-     * Returns {@code true} if this governor is actively suppressing the given mob's AI awareness,
-     * so {@link EntityLodOptimizer} does not wake a jammed farm mob or boxed villager prematurely.
+     * Returns {@code true} if this governor is actively suppressing the given mob's AI awareness.
      */
     public boolean isMobManagedByFarmGovernor(UUID id) {
-        return aiSuppressedByUs.contains(id);
+        return aiOwnership.isAiSuppressedByReason(id, MobAiOwnershipManager.REASON_FARM);
     }
 
     /**
@@ -607,10 +542,10 @@ public final class FarmVillagerGovernor implements Listener {
     }
 
     public int getTrackedAiSuppressedSize() {
-        return aiSuppressedByUs.size();
+        return aiOwnership.countByAiReason(MobAiOwnershipManager.REASON_FARM);
     }
 
     public int getTrackedCollisionSuppressedSize() {
-        return collisionSuppressedByUs.size();
+        return aiOwnership.getCollisionTrackedCount();
     }
 }

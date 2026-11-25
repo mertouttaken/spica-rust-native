@@ -1,10 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -63,6 +59,7 @@ impl Default for ServerConfig {
 pub struct BrainConfig {
     pub ipc_host: String,
     pub ipc_port: u16,
+    pub allow_non_loopback_ipc: bool,
     pub metrics_port: u16,
     pub enable_metrics_http: bool,
     pub base_full_ai_range: f64,
@@ -78,6 +75,7 @@ impl Default for BrainConfig {
         Self {
             ipc_host: "127.0.0.1".to_string(),
             ipc_port: 25595,
+            allow_non_loopback_ipc: false,
             metrics_port: 9120,
             enable_metrics_http: true,
             base_full_ai_range: 32.0,
@@ -114,6 +112,7 @@ pub struct BackupConfig {
     pub keep_last: usize,
     pub backup_dir: String,
     pub worlds: Vec<String>,
+    pub require_all_worlds: bool,
     pub compression_level: u32,
     pub flush_wait_ms: u64,
 }
@@ -130,8 +129,9 @@ impl Default for BackupConfig {
                 "world_nether".to_string(),
                 "world_the_end".to_string(),
             ],
+            require_all_worlds: true,
             compression_level: 3,
-            flush_wait_ms: 2500,
+            flush_wait_ms: 15_000,
         }
     }
 }
@@ -222,7 +222,7 @@ impl LauncherConfig {
         self.backup.interval_minutes = self.backup.interval_minutes.max(1);
         self.backup.keep_last = self.backup.keep_last.max(1);
         self.backup.compression_level = self.backup.compression_level.clamp(1, 9);
-        self.backup.flush_wait_ms = self.backup.flush_wait_ms.clamp(500, 15_000);
+        self.backup.flush_wait_ms = self.backup.flush_wait_ms.clamp(500, 300_000);
         if self.backup.backup_dir.trim().is_empty() {
             self.backup.backup_dir = "backups".to_string();
         }
@@ -232,43 +232,18 @@ impl LauncherConfig {
     }
 }
 
-/// SplitMix64 mixing function for non-cryptographic-dependency high-entropy token generation.
-fn splitmix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = x;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
-}
-
-/// Generates a 32-character lowercase hexadecimal IPC authentication token
-/// using SystemTime nanoseconds, process ID, stack address entropy, and an atomic counter.
+/// Generates a 64-character (256-bit) lowercase hexadecimal IPC authentication token using
+/// the operating system CSPRNG (`getrandom`: `BCryptGenRandom` on Windows, `getrandom(2)` on Linux).
 pub fn generate_auth_token() -> String {
-    let now_nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let low_time = now_nanos as u64;
-    let high_time = (now_nanos >> 64) as u64;
-    let pid = u64::from(std::process::id());
-    let seq = TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
-
-    let stack_probe: u64 = 0x517c_c1b7_2722_0a95;
-    let addr_entropy = (&stack_probe as *const u64) as usize as u64;
-
-    let seed1 = low_time
-        ^ pid.rotate_left(17)
-        ^ seq.wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        ^ addr_entropy;
-    let seed2 = high_time
-        ^ low_time.rotate_right(23)
-        ^ pid.wrapping_mul(0xbf58_476d_1ce4_e5b9)
-        ^ seq.rotate_left(31)
-        ^ 0xa076_1d64_78bd_642f;
-
-    let part1 = splitmix64(seed1);
-    let part2 = splitmix64(seed2 ^ part1.rotate_left(13));
-    format!("{:016x}{:016x}", part1, part2)
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .expect("OS CSPRNG (getrandom) basarisiz oldu; guvenli IPC token uretilemiyor");
+    let mut out = String::with_capacity(64);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{:02x}", b);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -286,14 +261,15 @@ mod tests {
         assert_eq!(decoded.brain.min_view_distance, 5);
         assert_eq!(decoded.brain.max_view_distance, 10);
         assert_eq!(decoded.native.worker_threads, 0);
+        assert!(decoded.backup.require_all_worlds);
     }
 
     #[test]
-    fn auth_token_is_32_hex_and_unique() {
+    fn auth_token_is_64_hex_csprng_and_unique() {
         let t1 = generate_auth_token();
         let t2 = generate_auth_token();
-        assert_eq!(t1.len(), 32);
-        assert_eq!(t2.len(), 32);
+        assert_eq!(t1.len(), 64);
+        assert_eq!(t2.len(), 64);
         assert!(t1.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(t2.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(t1, t2);

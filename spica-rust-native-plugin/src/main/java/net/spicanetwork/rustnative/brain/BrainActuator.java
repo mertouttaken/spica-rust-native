@@ -6,6 +6,7 @@ import net.spicanetwork.rustnative.optimizer.EntityLodOptimizer;
 import net.spicanetwork.rustnative.optimizer.FarmVillagerGovernor;
 import net.spicanetwork.rustnative.optimizer.MobTrackingOptimizer;
 import net.spicanetwork.rustnative.optimizer.RedstoneHopperGovernor;
+import net.spicanetwork.rustnative.optimizer.SafeItemMergeHelper;
 import net.spicanetwork.rustnative.optimizer.SurgeExplosionGuard;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -40,7 +41,6 @@ public final class BrainActuator {
     private static final long EMERGENCY_DROP_COOLDOWN_MS = 5_000L;
     private static final long IPC_DIRECTIVE_STALE_MS = 15_000L;
     private static final int MAX_ITEM_MERGE_PAIRS_PER_WORLD = 512;
-    private static final int INFINITE_PICKUP_DELAY_THRESHOLD = 32_767;
 
     private final SpicaRustAPI api;
     private final EntityLodOptimizer optimizer;
@@ -53,6 +53,7 @@ public final class BrainActuator {
     private final List<Item> itemScratch = new ArrayList<>(1024);
     private final List<Entity> entityScratch = new ArrayList<>(4096);
     private final Map<UUID, int[]> originalWorldDistances = new HashMap<>();
+    private final Map<UUID, int[]> lastSpicaWrittenDistances = new HashMap<>();
 
     private BrainIpcClient ipcClient;
 
@@ -216,13 +217,17 @@ public final class BrainActuator {
                 redstoneChunksThrottled, redstoneOpsBlocked
             );
             BrainDirective ipcDir = ipcClient.getLatestDirective();
-            long ipcAgeMs = System.currentTimeMillis() - ipcClient.getLastDirectiveTimestampMs();
-            if (ipcDir != null && ipcClient.getLastDirectiveTimestampMs() > 0L && ipcAgeMs <= IPC_DIRECTIVE_STALE_MS) {
+            long lastDirTs = ipcClient.getLastDirectiveTimestampMs();
+            long ipcAgeMs = System.currentTimeMillis() - lastDirTs;
+            if (ipcDir != null && lastDirTs > 0L && ipcAgeMs <= IPC_DIRECTIVE_STALE_MS) {
                 directive = ipcDir;
                 if (Float.isFinite(ipcDir.ewmaMspt()) && ipcDir.ewmaMspt() > 0f) {
                     this.localEwmaMspt = ipcDir.ewmaMspt();
                 }
                 this.lastBrainSource = "LAUNCHER IPC";
+            } else if (lastDirTs > 0L && ipcAgeMs > IPC_DIRECTIVE_STALE_MS) {
+                // Y8: Force reconnect on stale/half-open IPC socket while falling back seamlessly
+                ipcClient.forceReconnect();
             }
         }
 
@@ -290,24 +295,52 @@ public final class BrainActuator {
 
         boolean changedAnyWorld = false;
         for (World world : Bukkit.getWorlds()) {
+            UUID worldId = world.getUID();
             int currentView = world.getViewDistance();
             int currentSim = world.getSimulationDistance();
 
-            if (currentView == targetView && currentSim == targetSim) {
+            // Y6: Respect runtime external admin/plugin distance overrides — if the live value
+            // differs from Spica's last written value, yield ownership of that axis instead of clobbering it.
+            int[] lastWritten = lastSpicaWrittenDistances.get(worldId);
+            boolean viewOwned = (lastWritten == null) || (lastWritten[0] == currentView);
+            boolean simOwned = (lastWritten == null) || (lastWritten[1] == currentSim);
+
+            if (!viewOwned && !simOwned) {
+                lastWritten[0] = Integer.MIN_VALUE;
+                lastWritten[1] = Integer.MIN_VALUE;
                 continue;
             }
 
-            originalWorldDistances.putIfAbsent(world.getUID(), new int[]{currentView, currentSim});
+            int desiredView = viewOwned ? targetView : currentView;
+            int desiredSim = simOwned ? Math.min(targetSim, desiredView) : currentSim;
+            if (currentView == desiredView && currentSim == desiredSim) {
+                if (lastWritten != null) {
+                    if (!viewOwned) {
+                        lastWritten[0] = Integer.MIN_VALUE;
+                    }
+                    if (!simOwned) {
+                        lastWritten[1] = Integer.MIN_VALUE;
+                    }
+                }
+                continue;
+            }
+
+            originalWorldDistances.putIfAbsent(worldId, new int[]{currentView, currentSim});
 
             try {
-                if (currentView != targetView) {
-                    world.setViewDistance(targetView);
+                int writtenView = viewOwned ? currentView : Integer.MIN_VALUE;
+                int writtenSim = simOwned ? currentSim : Integer.MIN_VALUE;
+                if (viewOwned && currentView != desiredView) {
+                    world.setViewDistance(desiredView);
+                    writtenView = desiredView;
                     changedAnyWorld = true;
                 }
-                if (currentSim != targetSim) {
-                    world.setSimulationDistance(targetSim);
+                if (simOwned && currentSim != desiredSim) {
+                    world.setSimulationDistance(desiredSim);
+                    writtenSim = desiredSim;
                     changedAnyWorld = true;
                 }
+                lastSpicaWrittenDistances.put(worldId, new int[]{writtenView, writtenSim});
             } catch (UnsupportedOperationException | IllegalArgumentException ex) {
                 logger.warning(
                     "[SpicaRustNative] Dunya '" + world.getName()
@@ -338,92 +371,21 @@ public final class BrainActuator {
 
             itemScratch.clear();
             for (Item item : groundItems) {
-                if (!item.isValid() || item.isDead()) {
-                    continue;
+                if (SafeItemMergeHelper.isEligibleCandidate(item)) {
+                    itemScratch.add(item);
                 }
-                if (item.getPickupDelay() >= INFINITE_PICKUP_DELAY_THRESHOLD) {
-                    continue;
-                }
-                ItemStack stack = item.getItemStack();
-                int maxStack = stack.getMaxStackSize();
-                int amount = stack.getAmount();
-                if (maxStack <= 1 || amount <= 0 || amount >= maxStack) {
-                    continue;
-                }
-                itemScratch.add(item);
             }
 
-            int itemCount = itemScratch.size();
-            if (itemCount < 2) {
-                continue;
-            }
-
-            brainArena.ensureEntityCapacity(itemCount);
-            for (int i = 0; i < itemCount; i++) {
-                Item item = itemScratch.get(i);
-                Location loc = item.getLocation();
-                ItemStack stack = item.getItemStack();
-                int typeBucket = (stack.getType().ordinal() << 1) | (stack.hasItemMeta() ? 1 : 0);
-                brainArena.setItem(
-                    i,
-                    (float) loc.getX(),
-                    (float) loc.getY(),
-                    (float) loc.getZ(),
-                    typeBucket,
-                    stack.getAmount()
+            if (itemScratch.size() >= 2) {
+                mergedEntities += SafeItemMergeHelper.planAndApplySafeMerges(
+                    api,
+                    brainArena,
+                    itemScratch,
+                    safeRadius,
+                    MAX_ITEM_MERGE_PAIRS_PER_WORLD
                 );
             }
-
-            int maxPairs = Math.min(itemCount, MAX_ITEM_MERGE_PAIRS_PER_WORLD);
-            int pairCount = api.planItemMerges(brainArena, itemCount, 64, safeRadius, maxPairs);
-            if (pairCount <= 0) {
-                continue;
-            }
-
-            int clampedPairs = Math.min(pairCount, brainArena.getEntityCapacity());
-            for (int p = 0; p < clampedPairs; p++) {
-                int targetIdx = brainArena.outIntA.get(p);
-                int sourceIdx = brainArena.outIntB.get(p);
-                if (targetIdx < 0 || targetIdx >= itemCount
-                    || sourceIdx < 0 || sourceIdx >= itemCount
-                    || targetIdx == sourceIdx) {
-                    continue;
-                }
-
-                Item targetItem = itemScratch.get(targetIdx);
-                Item sourceItem = itemScratch.get(sourceIdx);
-                if (!targetItem.isValid() || !sourceItem.isValid()) {
-                    continue;
-                }
-
-                ItemStack targetStack = targetItem.getItemStack();
-                ItemStack sourceStack = sourceItem.getItemStack();
-
-                // Critical NBT / enchantment / PDC safety gate before merging stacks
-                if (!targetStack.isSimilar(sourceStack)) {
-                    continue;
-                }
-
-                int maxStackSize = targetStack.getMaxStackSize();
-                int freeSpace = maxStackSize - targetStack.getAmount();
-                int sourceAmount = sourceStack.getAmount();
-                if (freeSpace <= 0 || sourceAmount <= 0) {
-                    continue;
-                }
-
-                int transfer = Math.min(freeSpace, sourceAmount);
-                targetStack.setAmount(targetStack.getAmount() + transfer);
-                targetItem.setItemStack(targetStack);
-
-                int remaining = sourceAmount - transfer;
-                if (remaining <= 0) {
-                    sourceItem.remove();
-                    mergedEntities++;
-                } else {
-                    sourceStack.setAmount(remaining);
-                    sourceItem.setItemStack(sourceStack);
-                }
-            }
+            itemScratch.clear();
         }
 
         return mergedEntities;
@@ -460,7 +422,13 @@ public final class BrainActuator {
         }
 
         long rustStart = System.nanoTime();
-        api.computeCollisions(brainArena, n, 2.0f, 0.5f, 0.5f);
+        long colliding = api.computeCollisions(brainArena, n, 2.0f, 0.5f, 0.5f);
+        if (colliding < 0L) {
+            double rustMs = (System.nanoTime() - rustStart) / 1_000_000.0;
+            entityScratch.clear();
+            double totalMs = (System.nanoTime() - start) / 1_000_000.0;
+            return new ChunkHeatmapReport(world.getName(), n, rustMs, totalMs, List.of());
+        }
         int hotCount = api.analyzeChunks(brainArena, n, clampedTopK);
         double rustMs = (System.nanoTime() - rustStart) / 1_000_000.0;
 
@@ -475,6 +443,7 @@ public final class BrainActuator {
             ));
         }
 
+        entityScratch.clear();
         double totalMs = (System.nanoTime() - start) / 1_000_000.0;
         return new ChunkHeatmapReport(world.getName(), n, rustMs, totalMs, entries);
     }
@@ -491,11 +460,14 @@ public final class BrainActuator {
                 continue;
             }
             int[] orig = entry.getValue();
+            int[] lastWritten = lastSpicaWrittenDistances.get(entry.getKey());
             try {
-                if (world.getViewDistance() != orig[0]) {
+                // Y6: Only restore view/sim distance if Spica's last written value is still active
+                // (never clobber manual admin or third-party plugin distance adjustments)
+                if (lastWritten != null && world.getViewDistance() == lastWritten[0] && world.getViewDistance() != orig[0]) {
                     world.setViewDistance(orig[0]);
                 }
-                if (world.getSimulationDistance() != orig[1]) {
+                if (lastWritten != null && world.getSimulationDistance() == lastWritten[1] && world.getSimulationDistance() != orig[1]) {
                     world.setSimulationDistance(orig[1]);
                 }
             } catch (UnsupportedOperationException | IllegalArgumentException ignored) {
@@ -503,6 +475,7 @@ public final class BrainActuator {
             }
         }
         originalWorldDistances.clear();
+        lastSpicaWrittenDistances.clear();
         lastAppliedViewDistance = -1;
         lastAppliedSimDistance = -1;
         lastViewChangeMs = 0L;

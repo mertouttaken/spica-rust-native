@@ -83,10 +83,14 @@ public final class RedstoneHopperGovernor implements Listener {
 
     // Configuration
     private boolean enabled = true;
+    private boolean monitorOnly = true;
     private int redstoneLimitPerSec = 320;
     private int hopperLimitPerSec = 240;
     private boolean protectPlayerTriggers = true;
     private boolean alertAdminsOnLockdown = true;
+
+    // Monotonic elapsed-time normalization for accurate per-second rates under TPS drops (Y4)
+    private long lastEvalNanos = System.nanoTime();
 
     // Live telemetry
     private long lastRustNanos = 0L;
@@ -109,6 +113,7 @@ public final class RedstoneHopperGovernor implements Listener {
 
     public void reloadConfig(FileConfiguration cfg) {
         this.enabled = cfg.getBoolean("redstone-governor.enabled", true);
+        this.monitorOnly = cfg.getBoolean("redstone-governor.monitor-only", true);
         this.redstoneLimitPerSec = Math.clamp(
             cfg.getInt("redstone-governor.redstone-limit-per-sec", 320),
             16,
@@ -121,6 +126,7 @@ public final class RedstoneHopperGovernor implements Listener {
         );
         this.protectPlayerTriggers = cfg.getBoolean("redstone-governor.protect-player-triggers", true);
         this.alertAdminsOnLockdown = cfg.getBoolean("redstone-governor.alert-admins-on-lockdown", true);
+        this.lastEvalNanos = System.nanoTime();
     }
 
     @EventHandler(priority = EventPriority.HIGH)
@@ -143,8 +149,8 @@ public final class RedstoneHopperGovernor implements Listener {
         ChunkActivity entry = getOrCreateActivity(block.getWorld(), block.getX() >> 4, block.getZ() >> 4);
         entry.redstoneEvents++;
 
-        if ((entry.action & RustNative.REDSTONE_ACTION_THROTTLE_REDSTONE) != 0) {
-            int slot = (entry.dropCounter++ * 97) & 255;
+        if (!monitorOnly && (entry.action & RustNative.REDSTONE_ACTION_THROTTLE_REDSTONE) != 0) {
+            int slot = (entry.redstoneDropCounter++ * 97) & 255;
             if (slot < entry.dropThreshold256) {
                 event.setNewCurrent(event.getOldCurrent());
                 redstoneBlockedTotal++;
@@ -177,8 +183,8 @@ public final class RedstoneHopperGovernor implements Listener {
         ChunkActivity entry = getOrCreateActivity(block.getWorld(), block.getX() >> 4, block.getZ() >> 4);
         entry.hopperMoves++;
 
-        if ((entry.action & RustNative.REDSTONE_ACTION_THROTTLE_HOPPERS) != 0) {
-            int slot = (entry.dropCounter++ * 97) & 255;
+        if (!monitorOnly && (entry.action & RustNative.REDSTONE_ACTION_THROTTLE_HOPPERS) != 0) {
+            int slot = (entry.hopperDropCounter++ * 97) & 255;
             if (slot < entry.dropThreshold256) {
                 event.setCancelled(true);
                 hopperBlockedTotal++;
@@ -208,6 +214,8 @@ public final class RedstoneHopperGovernor implements Listener {
         }
 
         long startNanos = System.nanoTime();
+        double elapsedSecs = Math.clamp((startNanos - lastEvalNanos) / 1_000_000_000.0, 0.25, 30.0);
+        this.lastEvalNanos = startNanos;
         long nowMs = System.currentTimeMillis();
 
         evalScratch.clear();
@@ -247,10 +255,12 @@ public final class RedstoneHopperGovernor implements Listener {
 
         for (int i = 0; i < chunkCount; i++) {
             ChunkActivity entry = evalScratch.get(i);
+            int rsPerSec = (int) Math.min(Integer.MAX_VALUE, Math.round(entry.redstoneEvents / elapsedSecs));
+            int hopPerSec = (int) Math.min(Integer.MAX_VALUE, Math.round(entry.hopperMoves / elapsedSecs));
             chunkX.put(i, entry.cx);
             chunkZ.put(i, entry.cz);
-            redstoneRate.put(i, entry.redstoneEvents);
-            hopperRate.put(i, entry.hopperMoves);
+            redstoneRate.put(i, rsPerSec);
+            hopperRate.put(i, hopPerSec);
             prevHeat.put(i, entry.heat);
         }
 
@@ -274,6 +284,11 @@ public final class RedstoneHopperGovernor implements Listener {
         long rustNanos = System.nanoTime() - rustStart;
 
         if (nativeThrottled < 0) {
+            for (int i = 0; i < chunkCount; i++) {
+                ChunkActivity entry = evalScratch.get(i);
+                entry.action = RustNative.REDSTONE_ACTION_NORMAL;
+                entry.dropThreshold256 = 0;
+            }
             resetWindowAndPrune();
             this.lastActiveChunkCount = chunkCount;
             this.lastThrottledChunkCount = 0;
@@ -305,7 +320,7 @@ public final class RedstoneHopperGovernor implements Listener {
             entry.heat = newHeat;
             entry.dropThreshold256 = newDropThreshold;
 
-            if (newAction != RustNative.REDSTONE_ACTION_NORMAL) {
+            if (!monitorOnly && newAction != RustNative.REDSTONE_ACTION_NORMAL) {
                 throttledCount++;
             }
 
@@ -316,17 +331,19 @@ public final class RedstoneHopperGovernor implements Listener {
                 entry.lastAlertMs = nowMs;
                 int blockX = (entry.cx << 4) + 8;
                 int blockZ = (entry.cz << 4) + 8;
-                int throttlePct = Math.clamp(Math.round(safeRatio * 100.0f), 0, 100);
+                int throttlePct = monitorOnly ? 0 : Math.clamp(Math.round(safeRatio * 100.0f), 0, 100);
+                String modePrefix = monitorOnly ? "[MONITOR] REDSTONE LOCKDOWN ADAYI" : "REDSTONE LOCKDOWN";
                 logger.warning(String.format(
                     Locale.US,
-                    "[SpicaRustNative] REDSTONE LOCKDOWN -> %s Chunk(%d, %d) [Blok %d, %d] | Redstone: %d/sn | Hopper: %d/sn | Heat: %.1f | Kisitlama: %d%%",
+                    "[SpicaRustNative] %s -> %s Chunk(%d, %d) [Blok %d, %d] | Redstone: %d/sn | Hopper: %d/sn | Heat: %.1f | Kisitlama: %d%%",
+                    modePrefix,
                     evalWorldNames.get(i),
                     entry.cx,
                     entry.cz,
                     blockX,
                     blockZ,
-                    entry.redstoneEvents,
-                    entry.hopperMoves,
+                    redstoneRate.get(i),
+                    hopperRate.get(i),
                     newHeat,
                     throttlePct
                 ));
@@ -342,13 +359,13 @@ public final class RedstoneHopperGovernor implements Listener {
             ChunkActivity entry = evalScratch.get(idx);
             float ratio = outThrottleRatio.get(idx);
             float safeRatio = Float.isFinite(ratio) ? Math.clamp(ratio, 0.0f, 1.0f) : 0.0f;
-            int throttlePercent = Math.clamp(Math.round(safeRatio * 100.0f), 0, 100);
+            int throttlePercent = monitorOnly ? 0 : Math.clamp(Math.round(safeRatio * 100.0f), 0, 100);
             nextHotChunks.add(new HotRedstoneChunk(
                 evalWorldNames.get(idx),
                 entry.cx,
                 entry.cz,
-                entry.redstoneEvents,
-                entry.hopperMoves,
+                redstoneRate.get(idx),
+                hopperRate.get(idx),
                 entry.heat,
                 entry.action,
                 throttlePercent
@@ -481,6 +498,10 @@ public final class RedstoneHopperGovernor implements Listener {
         return enabled;
     }
 
+    public boolean isMonitorOnly() {
+        return monitorOnly;
+    }
+
     public double getLastRustMs() {
         return lastRustNanos / 1_000_000.0;
     }
@@ -549,7 +570,8 @@ public final class RedstoneHopperGovernor implements Listener {
         float heat;
         int action;
         int dropThreshold256;
-        int dropCounter;
+        int redstoneDropCounter;
+        int hopperDropCounter;
         long lastAlertMs;
 
         ChunkActivity(int cx, int cz) {

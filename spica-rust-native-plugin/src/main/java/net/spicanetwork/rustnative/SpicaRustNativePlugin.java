@@ -9,6 +9,7 @@ import net.spicanetwork.rustnative.nativebridge.NativeLoader;
 import net.spicanetwork.rustnative.nativebridge.RustNative;
 import net.spicanetwork.rustnative.optimizer.EntityLodOptimizer;
 import net.spicanetwork.rustnative.optimizer.FarmVillagerGovernor;
+import net.spicanetwork.rustnative.optimizer.MobAiOwnershipManager;
 import net.spicanetwork.rustnative.optimizer.MobTrackingOptimizer;
 import net.spicanetwork.rustnative.optimizer.RedstoneHopperGovernor;
 import net.spicanetwork.rustnative.optimizer.SurgeExplosionGuard;
@@ -24,6 +25,7 @@ import org.bukkit.scheduler.BukkitTask;
 public final class SpicaRustNativePlugin extends JavaPlugin {
 
     private SpicaRustAPI api;
+    private MobAiOwnershipManager aiOwnership;
     private EntityLodOptimizer optimizer;
     private FarmVillagerGovernor farmGovernor;
     private SurgeExplosionGuard surgeGuard;
@@ -56,15 +58,18 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
         }
 
         this.api = new SpicaRustAPI();
-        this.optimizer = new EntityLodOptimizer(api);
+        this.aiOwnership = new MobAiOwnershipManager(this);
+        Bukkit.getPluginManager().registerEvents(aiOwnership, this);
+        int recoveredOrphans = aiOwnership.recoverAllLoadedWorlds();
+        if (recoveredOrphans > 0) {
+            getLogger().info("[SpicaRustNative] Onceki kapanistan kalan " + recoveredOrphans + " mob AI/carpisma durumu guvenle kurtarildi.");
+        }
+
+        this.optimizer = new EntityLodOptimizer(api, aiOwnership);
         this.optimizer.reloadConfig(getConfig());
 
-        this.farmGovernor = new FarmVillagerGovernor(api);
+        this.farmGovernor = new FarmVillagerGovernor(api, aiOwnership);
         this.farmGovernor.reloadConfig(getConfig());
-
-        // Coordinate AI suppression state cleanly between EntityLodOptimizer and FarmVillagerGovernor
-        this.optimizer.setExternalAiManagedPredicate(farmGovernor::isMobManagedByFarmGovernor);
-        this.farmGovernor.setExternalAiManagedPredicate(optimizer::isHibernatedByUs);
         Bukkit.getPluginManager().registerEvents(farmGovernor, this);
 
         this.surgeGuard = new SurgeExplosionGuard(this, api);
@@ -163,6 +168,12 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
                 getLogger().info("[SpicaRustNative] " + restored + " uyutulmus mob guvenle uyandirildi.");
             }
         }
+        if (aiOwnership != null) {
+            int remaining = aiOwnership.restoreEverything();
+            if (remaining > 0) {
+                getLogger().info("[SpicaRustNative] Kalan " + remaining + " Spica etiketli mob guvenle geri yuklendi.");
+            }
+        }
         if (api != null) {
             Bukkit.getServicesManager().unregister(SpicaRustAPI.class, api);
         }
@@ -190,6 +201,10 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
         if (farmGovernorTask != null) {
             farmGovernorTask.cancel();
             farmGovernorTask = null;
+        }
+        if (optimizerTask != null) {
+            optimizerTask.cancel();
+            optimizerTask = null;
         }
         if (brainIpcClient != null) {
             brainIpcClient.shutdown();

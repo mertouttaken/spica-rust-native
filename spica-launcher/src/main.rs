@@ -238,6 +238,7 @@ async fn main() -> ExitCode {
     let ipc_handle = match ipc::start_ipc_server(
         &cfg.brain.ipc_host,
         cfg.brain.ipc_port,
+        cfg.brain.allow_non_loopback_ipc,
         ipc_token,
         Arc::clone(&brain),
         shutdown_rx.clone(),

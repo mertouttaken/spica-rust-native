@@ -328,9 +328,14 @@ public final class RustNative {
 
     /**
      * Computes a parallel zero-copy 3D block diff between {@code currentBlocks} and {@code targetBlocks}
-     * (int32 block-state IDs in YZX order: {@code idx = (y * depth + z) * width + x}), returning total
-     * differing blocks and writing up to {@code maxDiffs} changed coordinates & target block IDs into
-     * {@code outRelX}, {@code outRelY}, {@code outRelZ}, and {@code outNewBlockId}.
+     * (int32 block-state IDs in YZX order: {@code idx = (y * depth + z) * width + x}).
+     *
+     * Return value semantics:
+     * - Count-only mode ({@code maxDiffs == 0}): returns the total number of differing blocks.
+     * - Extraction mode ({@code maxDiffs > 0}): writes up to {@code maxDiffs} changed entries into
+     *   {@code outRelX}, {@code outRelY}, {@code outRelZ}, and {@code outNewBlockId} and returns the
+     *   number of entries written (capped at {@code maxDiffs}).
+     * - Returns {@code -1} on invalid dimensions, undersized/read-only/overlapping buffers, or error.
      */
     public static native int nativeComputeBlockDiff(
         int width,

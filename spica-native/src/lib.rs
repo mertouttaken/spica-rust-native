@@ -7,6 +7,7 @@
 pub mod block_diff;
 pub mod c_abi;
 pub mod farm_governor;
+pub mod ffi_guard;
 pub mod flowfield;
 pub mod governor;
 pub mod heatmap;

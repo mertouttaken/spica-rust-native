@@ -20,9 +20,13 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDeathEvent;
+import org.bukkit.event.entity.EntityRemoveEvent;
 import org.bukkit.event.entity.EntityTargetLivingEntityEvent;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
+import org.bukkit.event.world.EntitiesUnloadEvent;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.util.Vector;
 
@@ -201,12 +205,70 @@ public final class MobTrackingOptimizer implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onEntityDeath(EntityDeathEvent event) {
+        purgeEntityUuid(event.getEntity().getUniqueId());
+    }
+
+    /**
+     * Y2: Keeps Spica's hidden-mob tracking map 100% synchronized with Purpur's native
+     * {@code CraftPlayer.onEntityRemove} whenever mobs despawn or are discarded.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onEntityRemove(EntityRemoveEvent event) {
+        if (!(event.getEntity() instanceof Mob)) {
+            return;
+        }
+        purgeEntityUuid(event.getEntity().getUniqueId());
+    }
+
+    /**
+     * Y1: Immediately reveal hidden mobs after same-world respawn so players never wait
+     * an interval to see nearby mobs around their bed/spawn point.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlayerRespawn(PlayerRespawnEvent event) {
+        if (!enabled) {
+            return;
+        }
+        restorePlayerHiddenMobs(event.getPlayer());
+    }
+
+    /**
+     * Y2: Cleans up unloaded mob UUIDs so re-loaded entities never drift out of sync with Purpur.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onEntitiesUnload(EntitiesUnloadEvent event) {
         if (hiddenMobsByPlayer.isEmpty()) {
             return;
         }
-        UUID deadId = event.getEntity().getUniqueId();
+        for (Entity entity : event.getEntities()) {
+            if (entity instanceof Mob) {
+                purgeEntityUuid(entity.getUniqueId());
+            }
+        }
+    }
+
+    /**
+     * Y1: Immediately reveals hidden mobs after a long-distance teleport so players never wait
+     * for the next tracking interval to see threats around their landing spot.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onPlayerTeleport(PlayerTeleportEvent event) {
+        if (!enabled) {
+            return;
+        }
+        Location from = event.getFrom();
+        Location to = event.getTo();
+        if (to == null || from.getWorld() != to.getWorld() || from.distanceSquared(to) >= 256.0) {
+            restorePlayerHiddenMobs(event.getPlayer());
+        }
+    }
+
+    private void purgeEntityUuid(UUID mobId) {
+        if (hiddenMobsByPlayer.isEmpty()) {
+            return;
+        }
         hiddenMobsByPlayer.values().removeIf(set -> {
-            set.remove(deadId);
+            set.remove(mobId);
             return set.isEmpty();
         });
     }
@@ -259,6 +321,7 @@ public final class MobTrackingOptimizer implements Listener {
         int totalVisiblePairs = 0;
         int totalCulledByBudget = 0;
         int deltasAppliedThisTick = 0;
+        int hidesAppliedThisTick = 0;
 
         for (World world : Bukkit.getWorlds()) {
             List<Player> worldPlayers = world.getPlayers();
@@ -393,7 +456,10 @@ public final class MobTrackingOptimizer implements Listener {
             statsView.put(2, 0);
             statsView.put(3, 0);
 
-            int remainingDeltas = Math.max(0, maxDeltasPerTick - deltasAppliedThisTick);
+            int remainingHideBudget = Math.max(0, maxDeltasPerTick - hidesAppliedThisTick);
+            // Y1: Always reserve ample room for SHOW transitions (which Rust emits FIRST before HIDE)
+            int callMaxDeltas = Math.max(remainingHideBudget + Math.min(256, maxDeltasPerTick), 128);
+            ensureDeltaCapacity(callMaxDeltas);
 
             long rustStart = System.nanoTime();
             int deltaCount = api.computeMobTracking(
@@ -417,7 +483,7 @@ public final class MobTrackingOptimizer implements Listener {
                 maxMobsPerPlayer,
                 safeBrainState,
                 hiddenBitsetBuf,
-                remainingDeltas,
+                callMaxDeltas,
                 deltaPlayerBuf,
                 deltaMobBuf,
                 deltaActionBuf,
@@ -429,11 +495,10 @@ public final class MobTrackingOptimizer implements Listener {
                 continue;
             }
 
-            totalHiddenPairs += Math.max(0, statsView.get(0));
             totalVisiblePairs += Math.max(0, statsView.get(1));
             totalCulledByBudget += Math.max(0, statsView.get(3));
 
-            int applyCount = Math.min(deltaCount, remainingDeltas);
+            int applyCount = Math.min(deltaCount, callMaxDeltas);
             for (int d = 0; d < applyCount; d++) {
                 int pIdx = deltaPlayer.get(d);
                 int mIdx = deltaMob.get(d);
@@ -452,13 +517,8 @@ public final class MobTrackingOptimizer implements Listener {
                 UUID playerId = player.getUniqueId();
                 UUID mobId = mob.getUniqueId();
 
-                if (action == RustNative.TRACK_ACTION_HIDE) {
-                    Set<UUID> hiddenSet = hiddenMobsByPlayer.computeIfAbsent(playerId, k -> new HashSet<>());
-                    if (hiddenSet.add(mobId)) {
-                        player.hideEntity(plugin, mob);
-                        deltasAppliedThisTick++;
-                    }
-                } else if (action == RustNative.TRACK_ACTION_SHOW) {
+                if (action == RustNative.TRACK_ACTION_SHOW) {
+                    // Y1: SHOW transitions ALWAYS execute unconditionally (never blocked by HIDE quota)
                     Set<UUID> hiddenSet = hiddenMobsByPlayer.get(playerId);
                     if (hiddenSet != null) {
                         hiddenSet.remove(mobId);
@@ -468,11 +528,36 @@ public final class MobTrackingOptimizer implements Listener {
                     }
                     player.showEntity(plugin, mob);
                     deltasAppliedThisTick++;
+                } else if (action == RustNative.TRACK_ACTION_HIDE) {
+                    if (hidesAppliedThisTick >= maxDeltasPerTick) {
+                        continue;
+                    }
+                    // Main-thread re-verification before hiding (Y1)
+                    if (isAlwaysVisibleMob(mob)) {
+                        continue;
+                    }
+                    Set<UUID> hiddenSet = hiddenMobsByPlayer.computeIfAbsent(playerId, k -> new HashSet<>());
+                    if (hiddenSet.add(mobId)) {
+                        player.hideEntity(plugin, mob);
+                        hidesAppliedThisTick++;
+                        deltasAppliedThisTick++;
+                    }
                 }
             }
         }
 
-        this.lastTotalHiddenPairs = totalHiddenPairs;
+        // Release scratch references so unloaded/dead entities are never retained (Y2)
+        playerScratch.clear();
+        mobScratch.clear();
+        mobIndexScratch.clear();
+
+        // Compute exact live hidden-pair count from actual tracked sets (never inflated by skipped HIDEs)
+        int actualHiddenPairs = 0;
+        for (Set<UUID> hiddenSet : hiddenMobsByPlayer.values()) {
+            actualHiddenPairs += hiddenSet.size();
+        }
+
+        this.lastTotalHiddenPairs = actualHiddenPairs;
         this.lastTotalVisiblePairs = totalVisiblePairs;
         this.lastCulledByBudget = totalCulledByBudget;
         this.lastDeltasApplied = deltasAppliedThisTick;
