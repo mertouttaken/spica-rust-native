@@ -1,0 +1,14 @@
+# Cargo workspace build artifacts
+target/
+spica-native/target/
+spica-launcher/target/
+Cargo.lock
+
+# Maven build artifacts
+spica-rust-native-plugin/target/
+spica-rust-native-plugin/src/main/resources/native/
+
+# Export / test outputs
+dist/
+spica-launcher.toml
+.test-server/

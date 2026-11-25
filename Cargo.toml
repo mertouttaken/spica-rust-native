@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "spica-native",
+    "spica-launcher",
+]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+strip = "symbols"

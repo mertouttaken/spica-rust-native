@@ -1,0 +1,53 @@
+# SpicaRustNative 2.0.0 (Purpur 1.21.4 Core + Rust Brain) Yapilandirmasi
+native:
+  # 0 = Otomatik (max(2, cekirdek/2), en fazla 8). Main thread + Netty + GC icin bosluk birakir.
+  worker-threads: 0
+
+brain:
+  # Rust Brain (spica-launcher IPC veya in-process Rust Governor) kontrol dongusunu aktif eder.
+  enabled: true
+  # -Dspica.ipc.host / -Dspica.ipc.port JVM ozellikleri yoksa kullanilacak yedek IPC adresi.
+  # Port 0 birakilirsa yalnizca in-process Rust Brain calisir (standalone mod).
+  ipc-fallback-host: "127.0.0.1"
+  ipc-fallback-port: 0
+  # Kac tick'te bir telemetri toplanip Rust Brain direktifi uygulansin (20 tick = 1 saniye).
+  tick-interval: 20
+  # Dinamik View/Simulation Distance sinirlari (Minecraft limitleri: 2..32).
+  min-view-distance: 5
+  max-view-distance: 10
+  min-sim-distance: 4
+  max-sim-distance: 8
+  actuation:
+    # Rust Brain direktiflerinin Purpur dunyalarina canli uygulanmasini kontrol eder.
+    enabled: true
+    # MSPT/EWMA durumuna gore dunya View Distance ve Simulation Distance degerlerini dinamik ayarla.
+    dynamic-view-distance: true
+    # Yerdeki benzer esyalari Rust Spatial-Hash planlayicisi ile NBT-guvenli birlestir.
+    rust-item-merge: true
+
+optimizer:
+  # Rust destekli periyodik Entity LOD / AI optimizasyonunu aktif eder.
+  enabled: true
+  # Kac tick'te bir dunya snapshot'i Rust'a gonderilsin (10 tick = 0.5 saniye idealdir).
+  interval-ticks: 10
+  # Oyuncuya bu mesafeden yakin moblar tam aktif (LOD_FULL) kalir.
+  full-ai-range: 32.0
+  # Bu mesafeden uzak moblarin agir pathfinding/AI dongusu guvenli sekilde uyutulur (setAware(false)).
+  # Oyuncu yaklasinca veya plugin kapaninca otomatik uyanirlar.
+  hibernate-range: 56.0
+  # Moblarin birbiriyle carpistigi noktalarda tarama ve uyari esigi (mob farm tespiti).
+  cramming-alert-neighbors: 12
+  # Isim etiketli (Nametag) moblara dokunma.
+  skip-named-mobs: true
+  # Evcil (Tamed) hayvanlara dokunma.
+  skip-tamed-mobs: true
+  # Bu mob turlerinin AI'si asla uyutulmaz.
+  excluded-types:
+    - VILLAGER
+    - WANDERING_TRADER
+    - IRON_GOLEM
+    - ENDER_DRAGON
+    - WITHER
+    - WARDEN
+    - ELDER_GUARDIAN
+    - PLAYER

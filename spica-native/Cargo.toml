@@ -1,0 +1,17 @@
+[package]
+name = "spica-rust-native"
+version = "2.0.0"
+edition = "2021"
+description = "High-performance Rust native engine (Spatial Hash + Rayon + Zero-Copy JNI/FFM) for Purpur/Paper 1.21.4"
+
+[lib]
+name = "spica_rust_native"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[dependencies]
+rayon = "1.10"
+jni = "0.21"
