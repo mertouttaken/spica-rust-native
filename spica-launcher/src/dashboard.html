@@ -1,0 +1,1402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SpicaRustNative v2.2.0 — Live Telemetry Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --card: #131a26;
+      --card-elevated: #172030;
+      --border: #1f2937;
+      --border-soft: #1a2434;
+      --text: #e5e7eb;
+      --text-dim: #94a3b8;
+      --text-muted: #64748b;
+      --green: #10b981;
+      --yellow: #f59e0b;
+      --orange: #f97316;
+      --red: #ef4444;
+      --emergency: #dc2626;
+      --cyan: #22d3ee;
+      --rose: #f43f5e;
+      --indigo: #818cf8;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Helvetica Neue", Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.45;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 20px 22px 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* Header */
+    .header {
+      background: linear-gradient(180deg, #151e2d 0%, var(--card) 100%);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 20px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .brand-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, rgba(34, 211, 238, 0.16), rgba(16, 185, 129, 0.14));
+      border: 1px solid rgba(34, 211, 238, 0.35);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .brand-title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: #f8fafc;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .version-pill {
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(34, 211, 238, 0.12);
+      color: var(--cyan);
+      border: 1px solid rgba(34, 211, 238, 0.28);
+    }
+
+    .brand-sub {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-top: 2px;
+    }
+
+    .header-meta {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      white-space: nowrap;
+    }
+
+    .badge-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 8px currentColor;
+    }
+
+    .state-GREEN {
+      color: var(--green);
+      background: rgba(16, 185, 129, 0.12);
+      border-color: rgba(16, 185, 129, 0.38);
+    }
+
+    .state-YELLOW {
+      color: var(--yellow);
+      background: rgba(245, 158, 11, 0.12);
+      border-color: rgba(245, 158, 11, 0.38);
+    }
+
+    .state-ORANGE {
+      color: var(--orange);
+      background: rgba(249, 115, 22, 0.13);
+      border-color: rgba(249, 115, 22, 0.42);
+    }
+
+    .state-RED {
+      color: var(--red);
+      background: rgba(239, 68, 68, 0.14);
+      border-color: rgba(239, 68, 68, 0.44);
+    }
+
+    .state-EMERGENCY {
+      color: #fca5a5;
+      background: rgba(220, 38, 38, 0.24);
+      border-color: var(--emergency);
+      animation: pulse-emergency 1.2s ease-in-out infinite;
+    }
+
+    @keyframes pulse-emergency {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.35); }
+      50% { box-shadow: 0 0 14px 2px rgba(220, 38, 38, 0.55); }
+    }
+
+    .ipc-connected {
+      color: var(--green);
+      border-color: rgba(16, 185, 129, 0.32);
+      background: rgba(16, 185, 129, 0.08);
+    }
+
+    .ipc-waiting {
+      color: var(--yellow);
+      border-color: rgba(245, 158, 11, 0.32);
+      background: rgba(245, 158, 11, 0.08);
+    }
+
+    .ipc-offline {
+      color: var(--red);
+      border-color: rgba(239, 68, 68, 0.35);
+      background: rgba(239, 68, 68, 0.1);
+    }
+
+    .uptime-chip {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-dim);
+      padding: 6px 11px;
+      border-radius: 8px;
+      background: rgba(11, 15, 23, 0.65);
+      border: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    .uptime-chip strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .nav-link {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text-dim);
+      text-decoration: none;
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: rgba(11, 15, 23, 0.55);
+      transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+    }
+
+    .nav-link:hover {
+      color: #f8fafc;
+      border-color: rgba(34, 211, 238, 0.5);
+      background: rgba(34, 211, 238, 0.08);
+    }
+
+    /* Directive Strip */
+    .directive-strip {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 18px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px 20px;
+    }
+
+    .directive-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--cyan);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+    }
+
+    .directive-items {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px 18px;
+      flex: 1;
+      justify-content: flex-end;
+    }
+
+    .dir-item {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      background: rgba(11, 15, 23, 0.55);
+      border: 1px solid var(--border-soft);
+      border-radius: 7px;
+      padding: 5px 10px;
+    }
+
+    .dir-key {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .dir-val {
+      font-family: var(--mono);
+      font-size: 12.5px;
+      font-weight: 600;
+      color: #f1f5f9;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* KPI Grid */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    @media (max-width: 1080px) {
+      .kpi-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 680px) {
+      .kpi-grid {
+        grid-template-columns: 1fr;
+      }
+      .directive-items {
+        justify-content: flex-start;
+      }
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      transition: border-color 0.15s ease;
+    }
+
+    .card:hover {
+      border-color: #2b384c;
+    }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .card-title {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-dim);
+    }
+
+    .card-tag {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-muted);
+      padding: 2px 7px;
+      border-radius: 6px;
+      background: rgba(11, 15, 23, 0.7);
+      border: 1px solid var(--border-soft);
+    }
+
+    .kpi-primary {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .mono-big {
+      font-family: var(--mono);
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1.1;
+      letter-spacing: -0.02em;
+      color: #f8fafc;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .mono-sub {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--text-dim);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .bar-block {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .bar-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11.5px;
+      color: var(--text-dim);
+      font-family: var(--mono);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 7px;
+      background: var(--bg);
+      border: 1px solid var(--border-soft);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: 999px;
+      background: var(--green);
+      transition: width 0.35s ease, background-color 0.25s ease;
+    }
+
+    .stat-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .mini-stat {
+      background: rgba(11, 15, 23, 0.58);
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+      padding: 9px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .mini-label {
+      font-size: 10.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+
+    .mini-val {
+      font-family: var(--mono);
+      font-size: 17px;
+      font-weight: 700;
+      color: #f1f5f9;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Chart Panel */
+    .chart-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 18px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .chart-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px 18px;
+    }
+
+    .chart-title-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .chart-title {
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #f1f5f9;
+    }
+
+    .chart-sub {
+      font-size: 11.5px;
+      color: var(--text-muted);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 14px;
+      font-size: 12px;
+      color: var(--text-dim);
+      font-family: var(--mono);
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .legend-swatch {
+      width: 14px;
+      height: 3px;
+      border-radius: 2px;
+      display: inline-block;
+    }
+
+    .legend-dashed {
+      width: 16px;
+      height: 0;
+      border-top: 2px dashed var(--rose);
+      display: inline-block;
+    }
+
+    .canvas-wrap {
+      position: relative;
+      width: 100%;
+      height: 290px;
+      background: rgba(11, 15, 23, 0.52);
+      border: 1px solid var(--border-soft);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    #telemetryChart {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: crosshair;
+    }
+
+    .chart-tooltip {
+      position: absolute;
+      pointer-events: none;
+      display: none;
+      min-width: 185px;
+      background: rgba(15, 23, 36, 0.96);
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 9px 11px;
+      font-family: var(--mono);
+      font-size: 11.5px;
+      color: var(--text);
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.48);
+      z-index: 10;
+    }
+
+    .tt-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 5px;
+      margin-bottom: 6px;
+      font-weight: 700;
+      color: #f8fafc;
+    }
+
+    .tt-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      line-height: 1.55;
+    }
+
+    .tt-k { color: var(--text-dim); }
+    .tt-v { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+    /* Footer */
+    .footer {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-size: 11.5px;
+      color: var(--text-muted);
+      font-family: var(--mono);
+      padding: 2px 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <div class="brand">
+        <div class="brand-icon" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"></polygon>
+            <line x1="12" y1="22" x2="12" y2="15.5"></line>
+            <polyline points="22 8.5 12 15.5 2 8.5"></polyline>
+            <polyline points="2 15.5 12 8.5 22 15.5"></polyline>
+            <line x1="12" y1="2" x2="12" y2="8.5"></line>
+          </svg>
+        </div>
+        <div>
+          <div class="brand-title">
+            SpicaRustNative
+            <span class="version-pill">v2.2.0</span>
+          </div>
+          <div class="brand-sub" id="serverMeta">Purpur 1.21.4 Core + Rust Brain</div>
+        </div>
+      </div>
+
+      <div class="header-meta">
+        <div class="badge state-GREEN" id="brainStateBadge">
+          <span class="badge-dot"></span>
+          <span id="brainStateText">GREEN</span>
+        </div>
+        <div class="badge ipc-waiting" id="ipcBadge">
+          <span class="badge-dot"></span>
+          <span id="ipcText">WAITING</span>
+        </div>
+        <div class="uptime-chip">
+          UPTIME <strong id="uptimeVal">00:00:00</strong>
+        </div>
+        <nav class="nav-links" aria-label="Raw endpoints">
+          <a class="nav-link" href="/status" target="_blank" rel="noopener">/status</a>
+          <a class="nav-link" href="/metrics" target="_blank" rel="noopener">/metrics</a>
+        </nav>
+      </div>
+    </header>
+
+    <!-- Active Rust Directive Strip -->
+    <section class="directive-strip" aria-label="Active Rust Directive">
+      <div class="directive-label">
+        <span>Active Rust Directive</span>
+      </div>
+      <div class="directive-items">
+        <div class="dir-item">
+          <span class="dir-key">ViewDist</span>
+          <span class="dir-val" id="dirViewDist">--</span>
+        </div>
+        <div class="dir-item">
+          <span class="dir-key">SimDist</span>
+          <span class="dir-val" id="dirSimDist">--</span>
+        </div>
+        <div class="dir-item">
+          <span class="dir-key">Full AI Range</span>
+          <span class="dir-val" id="dirFullAi">--</span>
+        </div>
+        <div class="dir-item">
+          <span class="dir-key">Hibernate Range</span>
+          <span class="dir-val" id="dirHibernate">--</span>
+        </div>
+        <div class="dir-item">
+          <span class="dir-key">Item Merge</span>
+          <span class="dir-val" id="dirItemMerge">--</span>
+        </div>
+        <div class="dir-item">
+          <span class="dir-key">Reason</span>
+          <span class="dir-val" id="dirReason">--</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6 KPI Cards -->
+    <section class="kpi-grid" aria-label="Live Performance KPIs">
+      <!-- 1. MSPT / EWMA -->
+      <article class="card">
+        <div class="card-head">
+          <span class="card-title">MSPT / EWMA</span>
+          <span class="card-tag" id="msptBudgetTag">0.0% budget</span>
+        </div>
+        <div class="kpi-primary">
+          <span class="mono-big" id="kpiMspt">0.0</span>
+          <span class="mono-sub">ms raw &nbsp;|&nbsp; EWMA <strong id="kpiEwma" style="color:#f59e0b;">0.0</strong> ms</span>
+        </div>
+        <div class="bar-block">
+          <div class="bar-meta">
+            <span>50ms Tick Budget</span>
+            <span id="msptBudgetText">0.0 / 50.0 ms</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" id="msptBar"></div>
+          </div>
+        </div>
+      </article>
+
+      <!-- 2. TPS -->
+      <article class="card">
+        <div class="card-head">
+          <span class="card-title">TPS</span>
+          <span class="card-tag" id="tpsStatusTag">OPTIMAL</span>
+        </div>
+        <div class="kpi-primary">
+          <span class="mono-big" id="kpiTps">20.00</span>
+          <span class="mono-sub">/ 20.00 ticks/sec</span>
+        </div>
+        <div class="bar-block">
+          <div class="bar-meta">
+            <span>Tick Stability</span>
+            <span id="tpsPctText">100.0%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" id="tpsBar"></div>
+          </div>
+        </div>
+      </article>
+
+      <!-- 3. Entities & Chunks -->
+      <article class="card">
+        <div class="card-head">
+          <span class="card-title">Entities &amp; Chunks</span>
+          <span class="card-tag" id="entityDensityTag">0.00 / chunk</span>
+        </div>
+        <div class="stat-row">
+          <div class="mini-stat">
+            <span class="mini-label">Entities</span>
+            <span class="mini-val" id="kpiEntities">0</span>
+          </div>
+          <div class="mini-stat">
+            <span class="mini-label">Chunks</span>
+            <span class="mini-val" id="kpiChunks">0</span>
+          </div>
+          <div class="mini-stat">
+            <span class="mini-label">Players</span>
+            <span class="mini-val" id="kpiPlayers" style="color:#22d3ee;">0</span>
+          </div>
+        </div>
+      </article>
+
+      <!-- 4. Rust AI & Farm Governor -->
+      <article class="card">
+        <div class="card-head">
+          <span class="card-title">Rust AI &amp; Farm Governor</span>
+          <span class="card-tag" id="governorSavedTag">0 governed</span>
+        </div>
+        <div class="stat-row">
+          <div class="mini-stat">
+            <span class="mini-label">Hibernated</span>
+            <span class="mini-val" id="kpiHibernated" style="color:#10b981;">0</span>
+          </div>
+          <div class="mini-stat">
+            <span class="mini-label">Farm Throt.</span>
+            <span class="mini-val" id="kpiFarmThrottled" style="color:#f59e0b;">0</span>
+          </div>
+          <div class="mini-stat">
+            <span class="mini-label">Villagers</span>
+            <span class="mini-val" id="kpiVillagersThrottled" style="color:#818cf8;">0</span>
+          </div>
+        </div>
+      </article>
+
+      <!-- 5. JVM Heap -->
+      <article class="card">
+        <div class="card-head">
+          <span class="card-title">JVM Heap</span>
+          <span class="card-tag" id="heapPctTag">0.0%</span>
+        </div>
+        <div class="kpi-primary">
+          <span class="mono-big" id="kpiHeapUsed">0</span>
+          <span class="mono-sub">/ <span id="kpiHeapMax">0</span> MB</span>
+        </div>
+        <div class="bar-block">
+          <div class="bar-meta">
+            <span>Heap Allocation</span>
+            <span id="heapDetailText">0 MB free</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" id="heapBar"></div>
+          </div>
+        </div>
+      </article>
+
+      <!-- 6. Host CPU & RAM -->
+      <article class="card">
+        <div class="card-head">
+          <span class="card-title">Host CPU &amp; RAM</span>
+          <span class="card-tag" id="hostCpuTag">0.0% CPU</span>
+        </div>
+        <div class="bar-block">
+          <div class="bar-meta">
+            <span>Host CPU</span>
+            <span id="hostCpuText">0.0%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" id="hostCpuBar"></div>
+          </div>
+        </div>
+        <div class="bar-block">
+          <div class="bar-meta">
+            <span>Host RAM</span>
+            <span id="hostRamText">0 / 0 MB (0.0%)</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" id="hostRamBar"></div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <!-- HiDPI Canvas Timeline -->
+    <section class="chart-card" aria-label="120-Second Telemetry Timeline">
+      <div class="chart-header">
+        <div class="chart-title-wrap">
+          <span class="chart-title">Live 120-Second Telemetry Timeline</span>
+          <span class="chart-sub" id="chartSampleInfo">0 / 120 samples buffered &middot; 1s polling interval</span>
+        </div>
+        <div class="legend">
+          <span class="legend-item">
+            <span class="legend-swatch" style="background:#22d3ee;"></span>MSPT
+          </span>
+          <span class="legend-item">
+            <span class="legend-swatch" style="background:#f59e0b;height:3.5px;"></span>EWMA MSPT
+          </span>
+          <span class="legend-item">
+            <span class="legend-dashed"></span>50ms Limit
+          </span>
+          <span class="legend-item">
+            <span class="legend-swatch" style="background:#10b981;"></span>TPS (<span id="legendTps">20.00</span>)
+          </span>
+        </div>
+      </div>
+
+      <div class="canvas-wrap" id="canvasWrap">
+        <canvas id="telemetryChart"></canvas>
+        <div class="chart-tooltip" id="chartTooltip"></div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <span>SpicaRustNative Embedded Dashboard &middot; Zero-Dependency Offline Build</span>
+      <span id="lastUpdated">Last sync: pending...</span>
+    </footer>
+  </div>
+
+  <script>
+    (function () {
+      "use strict";
+
+      const STATE_META = {
+        0: { name: "GREEN", color: "#10b981" },
+        1: { name: "YELLOW", color: "#f59e0b" },
+        2: { name: "ORANGE", color: "#f97316" },
+        3: { name: "RED", color: "#ef4444" },
+        4: { name: "EMERGENCY", color: "#dc2626" }
+      };
+
+      const $ = (id) => document.getElementById(id);
+
+      const els = {
+        serverMeta: $("serverMeta"),
+        brainStateBadge: $("brainStateBadge"),
+        brainStateText: $("brainStateText"),
+        ipcBadge: $("ipcBadge"),
+        ipcText: $("ipcText"),
+        uptimeVal: $("uptimeVal"),
+        dirViewDist: $("dirViewDist"),
+        dirSimDist: $("dirSimDist"),
+        dirFullAi: $("dirFullAi"),
+        dirHibernate: $("dirHibernate"),
+        dirItemMerge: $("dirItemMerge"),
+        dirReason: $("dirReason"),
+        kpiMspt: $("kpiMspt"),
+        kpiEwma: $("kpiEwma"),
+        msptBudgetTag: $("msptBudgetTag"),
+        msptBudgetText: $("msptBudgetText"),
+        msptBar: $("msptBar"),
+        kpiTps: $("kpiTps"),
+        tpsStatusTag: $("tpsStatusTag"),
+        tpsPctText: $("tpsPctText"),
+        tpsBar: $("tpsBar"),
+        kpiEntities: $("kpiEntities"),
+        kpiChunks: $("kpiChunks"),
+        kpiPlayers: $("kpiPlayers"),
+        entityDensityTag: $("entityDensityTag"),
+        kpiHibernated: $("kpiHibernated"),
+        kpiFarmThrottled: $("kpiFarmThrottled"),
+        kpiVillagersThrottled: $("kpiVillagersThrottled"),
+        governorSavedTag: $("governorSavedTag"),
+        kpiHeapUsed: $("kpiHeapUsed"),
+        kpiHeapMax: $("kpiHeapMax"),
+        heapPctTag: $("heapPctTag"),
+        heapDetailText: $("heapDetailText"),
+        heapBar: $("heapBar"),
+        hostCpuTag: $("hostCpuTag"),
+        hostCpuText: $("hostCpuText"),
+        hostCpuBar: $("hostCpuBar"),
+        hostRamText: $("hostRamText"),
+        hostRamBar: $("hostRamBar"),
+        chartSampleInfo: $("chartSampleInfo"),
+        legendTps: $("legendTps"),
+        lastUpdated: $("lastUpdated"),
+        canvasWrap: $("canvasWrap"),
+        canvas: $("telemetryChart"),
+        tooltip: $("chartTooltip")
+      };
+
+      let latestHistory = [];
+      let hoverIndex = -1;
+      let isFetching = false;
+
+      function clamp(val, min, max) {
+        return Math.max(min, Math.min(max, val));
+      }
+
+      function num(val, fallback) {
+        const n = Number(val);
+        return Number.isFinite(n) ? n : fallback;
+      }
+
+      function formatUptime(totalSecs) {
+        const s = Math.max(0, Math.floor(num(totalSecs, 0)));
+        const days = Math.floor(s / 86400);
+        const hrs = Math.floor((s % 86400) / 3600);
+        const mins = Math.floor((s % 3600) / 60);
+        const secs = s % 60;
+        const pad = (v) => String(v).padStart(2, "0");
+        if (days > 0) {
+          return days + "d " + pad(hrs) + ":" + pad(mins) + ":" + pad(secs);
+        }
+        return pad(hrs) + ":" + pad(mins) + ":" + pad(secs);
+      }
+
+      function budgetColor(pct) {
+        if (pct >= 92) return "#ef4444";
+        if (pct >= 76) return "#f97316";
+        if (pct >= 56) return "#f59e0b";
+        return "#10b981";
+      }
+
+      function tpsColor(tps) {
+        if (tps < 14.0) return "#dc2626";
+        if (tps < 16.5) return "#ef4444";
+        if (tps < 18.0) return "#f97316";
+        if (tps < 19.3) return "#f59e0b";
+        return "#10b981";
+      }
+
+      function tpsLabel(tps) {
+        if (tps < 14.0) return "EMERGENCY";
+        if (tps < 16.5) return "CRITICAL";
+        if (tps < 18.0) return "DEGRADED";
+        if (tps < 19.3) return "STRAINED";
+        return "OPTIMAL";
+      }
+
+      function setBar(el, pct, color) {
+        const safe = clamp(num(pct, 0), 0, 100);
+        el.style.width = safe.toFixed(1) + "%";
+        el.style.backgroundColor = color;
+      }
+
+      function updateDashboard(data) {
+        const snap = (data && data.snapshot) ? data.snapshot : {};
+        const dir = snap.directive || {};
+        latestHistory = Array.isArray(data && data.history) ? data.history : [];
+
+        // Brand subtitle
+        const serverName = snap.serverName || "";
+        const pluginVer = snap.pluginVersion || "";
+        if (serverName || pluginVer) {
+          const detail = [serverName, pluginVer ? "Plugin v" + pluginVer : ""].filter(Boolean).join(" · ");
+          els.serverMeta.textContent = "Purpur 1.21.4 Core + Rust Brain · " + detail;
+        } else {
+          els.serverMeta.textContent = "Purpur 1.21.4 Core + Rust Brain";
+        }
+
+        // State Badge
+        const stateStr = String(snap.state || "GREEN").toUpperCase();
+        const validStates = ["GREEN", "YELLOW", "ORANGE", "RED", "EMERGENCY"];
+        const safeState = validStates.includes(stateStr) ? stateStr : "GREEN";
+        els.brainStateBadge.className = "badge state-" + safeState;
+        els.brainStateText.textContent = safeState;
+
+        // IPC Badge
+        if (snap.connected) {
+          els.ipcBadge.className = "badge ipc-connected";
+          els.ipcText.textContent = "CONNECTED";
+        } else {
+          els.ipcBadge.className = "badge ipc-waiting";
+          els.ipcText.textContent = "WAITING";
+        }
+
+        // Uptime
+        els.uptimeVal.textContent = formatUptime(snap.uptimeSecs);
+
+        // Directive Strip
+        els.dirViewDist.textContent = dir.viewDistance !== undefined ? dir.viewDistance + " ch" : "--";
+        els.dirSimDist.textContent = dir.simDistance !== undefined ? dir.simDistance + " ch" : "--";
+        els.dirFullAi.textContent = dir.fullAiRange !== undefined ? num(dir.fullAiRange, 0).toFixed(1) + " blk" : "--";
+        els.dirHibernate.textContent = dir.hibernateRange !== undefined ? num(dir.hibernateRange, 0).toFixed(1) + " blk" : "--";
+        if (dir.itemMergeEnabled !== undefined) {
+          const r = num(dir.itemMergeRadius, 0).toFixed(1);
+          els.dirItemMerge.textContent = (dir.itemMergeEnabled ? "ON" : "OFF") + " (" + r + "m)";
+          els.dirItemMerge.style.color = dir.itemMergeEnabled ? "#f59e0b" : "#94a3b8";
+        } else {
+          els.dirItemMerge.textContent = "--";
+          els.dirItemMerge.style.color = "#f1f5f9";
+        }
+        els.dirReason.textContent = dir.reason || "healthy";
+
+        // 1. MSPT / EWMA
+        const mspt = num(snap.mspt, 0);
+        const ewma = num(snap.ewmaMspt, 0);
+        const budgetPct = (ewma / 50.0) * 100.0;
+        els.kpiMspt.textContent = mspt.toFixed(1);
+        els.kpiEwma.textContent = ewma.toFixed(1);
+        els.msptBudgetTag.textContent = budgetPct.toFixed(1) + "% budget";
+        els.msptBudgetText.textContent = ewma.toFixed(1) + " / 50.0 ms";
+        setBar(els.msptBar, budgetPct, budgetColor(budgetPct));
+
+        // 2. TPS
+        const tps = clamp(num(snap.tps, 20), 0, 20);
+        const tpsPct = (tps / 20.0) * 100.0;
+        const tColor = tpsColor(tps);
+        els.kpiTps.textContent = tps.toFixed(2);
+        els.kpiTps.style.color = tColor;
+        els.tpsStatusTag.textContent = tpsLabel(tps);
+        els.tpsStatusTag.style.color = tColor;
+        els.tpsPctText.textContent = tpsPct.toFixed(1) + "%";
+        setBar(els.tpsBar, tpsPct, tColor);
+        els.legendTps.textContent = tps.toFixed(2);
+
+        // 3. Entities & Chunks
+        const entities = Math.round(num(snap.entities, 0));
+        const chunks = Math.round(num(snap.loadedChunks, 0));
+        const players = Math.round(num(snap.players, 0));
+        els.kpiEntities.textContent = entities.toLocaleString();
+        els.kpiChunks.textContent = chunks.toLocaleString();
+        els.kpiPlayers.textContent = players.toLocaleString();
+        const density = chunks > 0 ? (entities / chunks).toFixed(2) : "0.00";
+        els.entityDensityTag.textContent = density + " / chunk";
+
+        // 4. Rust AI & Farm Governor
+        const hibernated = Math.round(num(snap.hibernated, 0));
+        const farmThrottled = Math.round(num(snap.farmThrottled, 0));
+        const villagers = Math.round(num(snap.villagersThrottled, 0));
+        const totalGov = hibernated + farmThrottled + villagers;
+        els.kpiHibernated.textContent = hibernated.toLocaleString();
+        els.kpiFarmThrottled.textContent = farmThrottled.toLocaleString();
+        els.kpiVillagersThrottled.textContent = villagers.toLocaleString();
+        els.governorSavedTag.textContent = totalGov.toLocaleString() + " governed";
+
+        // 5. JVM Heap
+        const heapUsed = Math.round(num(snap.heapUsedMb, 0));
+        const heapMax = Math.round(num(snap.heapMaxMb, 0));
+        const heapPct = heapMax > 0 ? (heapUsed / heapMax) * 100.0 : 0;
+        const heapFree = Math.max(0, heapMax - heapUsed);
+        els.kpiHeapUsed.textContent = heapUsed.toLocaleString();
+        els.kpiHeapMax.textContent = heapMax.toLocaleString();
+        els.heapPctTag.textContent = heapPct.toFixed(1) + "%";
+        els.heapDetailText.textContent = heapFree.toLocaleString() + " MB free";
+        setBar(els.heapBar, heapPct, heapPct >= 88 ? "#ef4444" : heapPct >= 75 ? "#f59e0b" : "#22d3ee");
+
+        // 6. Host CPU & RAM
+        const hostCpu = clamp(num(snap.hostCpuPct, 0), 0, 100);
+        const ramUsed = Math.round(num(snap.hostRamUsedMb, 0));
+        const ramTotal = Math.round(num(snap.hostRamTotalMb, 0));
+        const ramPct = ramTotal > 0 ? (ramUsed / ramTotal) * 100.0 : 0;
+        els.hostCpuTag.textContent = hostCpu.toFixed(1) + "% CPU";
+        els.hostCpuText.textContent = hostCpu.toFixed(1) + "%";
+        setBar(els.hostCpuBar, hostCpu, hostCpu >= 85 ? "#ef4444" : hostCpu >= 65 ? "#f59e0b" : "#10b981");
+        els.hostRamText.textContent = ramUsed.toLocaleString() + " / " + ramTotal.toLocaleString() + " MB (" + ramPct.toFixed(1) + "%)";
+        setBar(els.hostRamBar, ramPct, ramPct >= 90 ? "#ef4444" : ramPct >= 75 ? "#f59e0b" : "#818cf8");
+
+        // Chart info & sync time
+        els.chartSampleInfo.textContent = latestHistory.length + " / 120 samples buffered · 1s polling interval";
+        const now = new Date();
+        els.lastUpdated.textContent = "Last sync: " + now.toLocaleTimeString();
+
+        if (hoverIndex >= latestHistory.length) {
+          hoverIndex = -1;
+          els.tooltip.style.display = "none";
+        }
+        drawChart();
+      }
+
+      // HiDPI Canvas Renderer
+      function drawChart() {
+        const canvas = els.canvas;
+        const wrap = els.canvasWrap;
+        const rect = wrap.getBoundingClientRect();
+        const width = Math.max(200, Math.floor(rect.width));
+        const height = Math.max(180, Math.floor(rect.height));
+        const dpr = Math.min(window.devicePixelRatio || 1, 3);
+
+        if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
+          canvas.width = Math.floor(width * dpr);
+          canvas.height = Math.floor(height * dpr);
+        }
+
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.save();
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, width, height);
+
+        const pad = { top: 20, right: 50, bottom: 28, left: 48 };
+        const plotW = width - pad.left - pad.right;
+        const plotH = height - pad.top - pad.bottom;
+
+        // Compute dynamic Y scale for MSPT (always shows 50ms limit with comfortable headroom)
+        let peakMspt = 55;
+        for (let i = 0; i < latestHistory.length; i++) {
+          const s = latestHistory[i];
+          const m = Math.max(num(s.mspt, 0), num(s.ewmaMspt, 0));
+          if (m > peakMspt) peakMspt = m;
+        }
+        const yMax = Math.max(60, Math.ceil((peakMspt * 1.15) / 10) * 10);
+
+        const yForMspt = (ms) => pad.top + plotH - (clamp(ms, 0, yMax) / yMax) * plotH;
+        const yForTps = (tps) => pad.top + plotH - (clamp(tps, 0, 20) / 20) * plotH;
+
+        // Horizontal gridlines & Left/Right Y-axis labels
+        const gridSteps = 5;
+        const monoFont = "11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+        const sansFont = "13px -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Arial, sans-serif";
+        ctx.font = monoFont;
+        ctx.textBaseline = "middle";
+
+        for (let i = 0; i <= gridSteps; i++) {
+          const frac = i / gridSteps;
+          const y = pad.top + plotH * (1 - frac);
+          const msVal = Math.round(yMax * frac);
+          const tpsVal = Math.round(20 * frac);
+
+          ctx.strokeStyle = "rgba(148, 163, 184, 0.1)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(pad.left, y);
+          ctx.lineTo(pad.left + plotW, y);
+          ctx.stroke();
+
+          ctx.fillStyle = "#64748b";
+          ctx.textAlign = "right";
+          ctx.fillText(msVal + "ms", pad.left - 8, y);
+
+          ctx.fillStyle = "rgba(16, 185, 129, 0.65)";
+          ctx.textAlign = "left";
+          ctx.fillText(tpsVal + "t", pad.left + plotW + 8, y);
+        }
+
+        // 50ms Tick Limit Dashed Line
+        const y50 = yForMspt(50);
+        ctx.save();
+        ctx.strokeStyle = "rgba(244, 63, 94, 0.85)";
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 5]);
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y50);
+        ctx.lineTo(pad.left + plotW, y50);
+        ctx.stroke();
+        ctx.restore();
+
+        ctx.fillStyle = "rgba(244, 63, 94, 0.9)";
+        ctx.textAlign = "right";
+        ctx.textBaseline = "bottom";
+        ctx.fillText("50ms Tick Limit", pad.left + plotW - 6, y50 - 4);
+
+        // X-axis baseline labels
+        ctx.fillStyle = "#64748b";
+        ctx.textBaseline = "top";
+        ctx.textAlign = "left";
+        ctx.fillText("-120s", pad.left, pad.top + plotH + 8);
+        ctx.textAlign = "center";
+        ctx.fillText("-60s", pad.left + plotW / 2, pad.top + plotH + 8);
+        ctx.textAlign = "right";
+        ctx.fillText("Now", pad.left + plotW, pad.top + plotH + 8);
+
+        // Empty state
+        if (latestHistory.length === 0) {
+          ctx.fillStyle = "#94a3b8";
+          ctx.font = sansFont;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("Waiting for Purpur telemetry stream via Rust IPC...", pad.left + plotW / 2, pad.top + plotH / 2);
+          ctx.restore();
+          return;
+        }
+
+        const count = latestHistory.length;
+        const maxSlots = 120;
+        const xForIndex = (idx) => {
+          if (count === 1) return pad.left + plotW;
+          const offsetSlots = maxSlots - count;
+          return pad.left + ((offsetSlots + idx) / (maxSlots - 1)) * plotW;
+        };
+
+        // TPS subtle curve (right axis)
+        ctx.save();
+        ctx.strokeStyle = "rgba(16, 185, 129, 0.55)";
+        ctx.lineWidth = 1.5;
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        for (let i = 0; i < count; i++) {
+          const x = xForIndex(i);
+          const y = yForTps(num(latestHistory[i].tps, 20));
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        if (count === 1) {
+          const x = xForIndex(0);
+          const y = yForTps(num(latestHistory[0].tps, 20));
+          ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+        }
+        ctx.stroke();
+        ctx.restore();
+
+        // MSPT soft cyan gradient area fill
+        if (count > 1) {
+          const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
+          grad.addColorStop(0, "rgba(34, 211, 238, 0.28)");
+          grad.addColorStop(1, "rgba(34, 211, 238, 0.01)");
+
+          ctx.beginPath();
+          ctx.moveTo(xForIndex(0), pad.top + plotH);
+          for (let i = 0; i < count; i++) {
+            ctx.lineTo(xForIndex(i), yForMspt(num(latestHistory[i].mspt, 0)));
+          }
+          ctx.lineTo(xForIndex(count - 1), pad.top + plotH);
+          ctx.closePath();
+          ctx.fillStyle = grad;
+          ctx.fill();
+        }
+
+        // MSPT Cyan Line
+        ctx.save();
+        ctx.strokeStyle = "#22d3ee";
+        ctx.lineWidth = 1.8;
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        for (let i = 0; i < count; i++) {
+          const x = xForIndex(i);
+          const y = yForMspt(num(latestHistory[i].mspt, 0));
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        if (count === 1) {
+          ctx.fillStyle = "#22d3ee";
+          ctx.beginPath();
+          ctx.arc(xForIndex(0), yForMspt(num(latestHistory[0].mspt, 0)), 3.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+
+        // EWMA MSPT Bold Amber Line
+        ctx.save();
+        ctx.strokeStyle = "#f59e0b";
+        ctx.lineWidth = 2.6;
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        for (let i = 0; i < count; i++) {
+          const x = xForIndex(i);
+          const y = yForMspt(num(latestHistory[i].ewmaMspt, 0));
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        if (count === 1) {
+          ctx.fillStyle = "#f59e0b";
+          ctx.beginPath();
+          ctx.arc(xForIndex(0), yForMspt(num(latestHistory[0].ewmaMspt, 0)), 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+
+        // Hover crosshair & highlight points
+        if (hoverIndex >= 0 && hoverIndex < count) {
+          const s = latestHistory[hoverIndex];
+          const hx = xForIndex(hoverIndex);
+          const hyMspt = yForMspt(num(s.mspt, 0));
+          const hyEwma = yForMspt(num(s.ewmaMspt, 0));
+
+          ctx.save();
+          ctx.strokeStyle = "rgba(226, 232, 240, 0.35)";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.moveTo(hx, pad.top);
+          ctx.lineTo(hx, pad.top + plotH);
+          ctx.stroke();
+          ctx.restore();
+
+          ctx.fillStyle = "#22d3ee";
+          ctx.beginPath();
+          ctx.arc(hx, hyMspt, 4, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = "#f59e0b";
+          ctx.beginPath();
+          ctx.arc(hx, hyEwma, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.restore();
+      }
+
+      function renderTooltip(idx, mouseX, mouseY) {
+        if (idx < 0 || idx >= latestHistory.length) {
+          els.tooltip.style.display = "none";
+          return;
+        }
+        const s = latestHistory[idx];
+        const st = STATE_META[s.stateCode] || STATE_META[0];
+        const tt = els.tooltip;
+        tt.textContent = "";
+
+        const head = document.createElement("div");
+        head.className = "tt-head";
+        const upSpan = document.createElement("span");
+        upSpan.textContent = "T+" + formatUptime(s.uptimeSecs);
+        const stSpan = document.createElement("span");
+        stSpan.textContent = st.name;
+        stSpan.style.color = st.color;
+        head.appendChild(upSpan);
+        head.appendChild(stSpan);
+        tt.appendChild(head);
+
+        const rows = [
+          ["MSPT", num(s.mspt, 0).toFixed(1) + " ms", "#22d3ee"],
+          ["EWMA", num(s.ewmaMspt, 0).toFixed(1) + " ms", "#f59e0b"],
+          ["TPS", num(s.tps, 20).toFixed(2), "#10b981"],
+          ["Entities", Math.round(num(s.entities, 0)).toLocaleString(), "#e5e7eb"],
+          ["Hibernated", Math.round(num(s.hibernated, 0)).toLocaleString(), "#10b981"],
+          ["Farm / Vil.", Math.round(num(s.farmThrottled, 0)) + " / " + Math.round(num(s.villagersThrottled, 0)), "#cbd5e1"],
+          ["Host CPU", num(s.hostCpuPct, 0).toFixed(1) + "%", "#94a3b8"]
+        ];
+
+        for (let i = 0; i < rows.length; i++) {
+          const row = document.createElement("div");
+          row.className = "tt-row";
+          const k = document.createElement("span");
+          k.className = "tt-k";
+          k.textContent = rows[i][0];
+          const v = document.createElement("span");
+          v.className = "tt-v";
+          v.textContent = rows[i][1];
+          v.style.color = rows[i][2];
+          row.appendChild(k);
+          row.appendChild(v);
+          tt.appendChild(row);
+        }
+
+        tt.style.display = "block";
+        const wrapW = els.canvasWrap.clientWidth;
+        const wrapH = els.canvasWrap.clientHeight;
+        const ttW = tt.offsetWidth || 190;
+        const ttH = tt.offsetHeight || 160;
+        const left = (mouseX + 16 + ttW > wrapW) ? Math.max(8, mouseX - ttW - 14) : mouseX + 14;
+        const top = clamp(mouseY - ttH / 2, 8, Math.max(8, wrapH - ttH - 8));
+        tt.style.left = left + "px";
+        tt.style.top = top + "px";
+      }
+
+      els.canvas.addEventListener("mousemove", function (ev) {
+        if (latestHistory.length === 0) return;
+        const rect = els.canvas.getBoundingClientRect();
+        const x = ev.clientX - rect.left;
+        const y = ev.clientY - rect.top;
+        const padLeft = 48;
+        const padRight = 50;
+        const plotW = Math.max(1, rect.width - padLeft - padRight);
+        const count = latestHistory.length;
+        const maxSlots = 120;
+        const offsetSlots = maxSlots - count;
+
+        const norm = clamp((x - padLeft) / plotW, 0, 1);
+        const slot = norm * (maxSlots - 1);
+        const idx = clamp(Math.round(slot - offsetSlots), 0, count - 1);
+        hoverIndex = idx;
+        drawChart();
+        renderTooltip(idx, x, y);
+      });
+
+      els.canvas.addEventListener("mouseleave", function () {
+        hoverIndex = -1;
+        els.tooltip.style.display = "none";
+        drawChart();
+      });
+
+      window.addEventListener("resize", function () {
+        drawChart();
+      });
+
+      async function refresh() {
+        if (isFetching) return;
+        isFetching = true;
+        try {
+          const resp = await fetch("/history", { cache: "no-store" });
+          if (!resp.ok) {
+            throw new Error("HTTP " + resp.status);
+          }
+          const payload = await resp.json();
+          updateDashboard(payload);
+        } catch (_err) {
+          els.ipcBadge.className = "badge ipc-offline";
+          els.ipcText.textContent = "DISCONNECTED";
+          els.lastUpdated.textContent = "Launcher HTTP unreachable · retrying...";
+        } finally {
+          isFetching = false;
+        }
+      }
+
+      refresh();
+      setInterval(refresh, 1000);
+    })();
+  </script>
+</body>
+</html>

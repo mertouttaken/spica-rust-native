@@ -1,4 +1,4 @@
-# SpicaRustNative v2.1 — Purpur 1.21.4 Core + Rust Brain
+# SpicaRustNative v2.2 — Purpur 1.21.4 Core + Rust Brain
 
 > **Execution Core:** Purpur / Paper 1.21.4 (100% compatible with existing Bukkit/Paper/Purpur plugins)  
 > **Brain & Orchestrator:** Rust (`spica-launcher` + `spica-native`)
@@ -17,7 +17,8 @@
 │  • Runs an async token-authenticated NDJSON IPC Brain server           │
 │  • Computes EWMA MSPT + 2-tick hysteresis (GREEN -> EMERGENCY)         │
 │  • Crash watchdog, interactive console (:brain, :stats, :restart)      │
-│  • Zero-JVM-overhead HTTP telemetry: /status (JSON) & /metrics (Prom)  │
+│  • Zero-JVM-overhead Embedded Web Dashboard (/) + 120s history chart   │
+│    + /status (JSON) & /metrics (Prometheus)                            │
 └──────────────────────────────────┬─────────────────────────────────────┘
                                    │ Localhost Token-Auth NDJSON IPC
 ┌──────────────────────────────────▼─────────────────────────────────────┐
@@ -78,7 +79,7 @@ Measured directly inside the running Purpur 1.21.4 JVM (**5,000 entities, 100 pl
   - Item Merge Planner (2,000 items → 1,568 pairs): `0.702 ms/tick`
   - Adaptive MSPT Governor evaluation: `5.5 ns/eval`
   - Farm & Villager Governor (5,000 entities × 100 players): `3.685 ms` (`~0.18 ms/tick` amortized at 1s interval)
-- **Unit Test Suite:** `26/26` Rust unit tests passing (`spica-launcher`: 11/11, `spica-rust-native`: 15/15)
+- **Unit Test Suite:** `29/29` Rust unit tests passing (`spica-launcher`: 14/14, `spica-rust-native`: 15/15)
 
 ---
 
@@ -102,7 +103,7 @@ Build the entire workspace (native engine, launcher, tests, and Purpur plugin JA
 
 Artifacts are exported to `dist/windows-x86_64/`:
 - `spica-launcher.exe` — Place next to `purpur-1.21.4.jar`
-- `SpicaRustNative-2.0.0.jar` — Place in `plugins/` (`spica_rust_native.dll` is bundled inside)
+- `SpicaRustNative-2.2.0.jar` — Place in `plugins/` (`spica_rust_native.dll` is bundled inside)
 
 Run Purpur under the Rust Brain:
 
@@ -132,17 +133,23 @@ Or cross-build a Linux `x86_64` release via Docker from Windows/macOS:
 docker build -f Dockerfile.linux --output type=local,dest=./dist/linux-x86_64 .
 ```
 
+### Automated Multi-Platform CI & Universal JAR (GitHub Actions)
+
+Every push/PR to `main` and version tag (`v*`) runs [`.github/workflows/ci-release.yml`](.github/workflows/ci-release.yml), compiling native libraries for **Windows `x86_64`**, **Linux `x86_64`**, and **Linux `aarch64` (ARM64)** and bundling all three into a single **Universal `SpicaRustNative-universal.jar`** plus platform-specific `spica-launcher` binaries and `SHA256SUMS.txt`.
+
 ---
 
 ## Commands & Telemetry
 
 ### Launcher Supervisor Commands (Terminal)
 - `:brain` — Live Rust Brain state (`GREEN`–`EMERGENCY`), EWMA MSPT, IPC status, and active directive
-- `:stats` — Host CPU/RAM, JVM heap usage, TPS, entity count, and hibernated mob count
+- `:stats` — Host CPU/RAM, JVM heap usage, TPS, entity count, hibernated mobs, and Farm/Villager Governor stats
 - `:restart` — Gracefully stops Purpur (`stop`) and restarts cleanly
 - `:stop` — Gracefully shuts down Purpur and exits the launcher
 
-### Zero-JVM-Overhead HTTP Endpoints
+### Zero-JVM-Overhead Embedded Web Dashboard & HTTP Endpoints
+- `GET http://127.0.0.1:9120/` (or `/dashboard`) — **Embedded Live Web Dashboard** (offline-ready dark ops UI with 120s MSPT/EWMA/TPS canvas chart, Brain State badge, active directives, Farm/Villager Governor & host CPU/RAM telemetry)
+- `GET http://127.0.0.1:9120/history` — Atomic JSON snapshot + 120-second telemetry ring buffer
 - `GET http://127.0.0.1:9120/status` — Live JSON status snapshot
 - `GET http://127.0.0.1:9120/metrics` — Prometheus exposition metrics (`spica_mspt`, `spica_ewma_mspt`, `spica_tps`, `spica_entities`, `spica_hibernated_mobs`, `spica_farm_throttled_mobs`, `spica_villagers_throttled`, `spica_brain_state`, `spica_host_cpu_percent`, etc.)
 

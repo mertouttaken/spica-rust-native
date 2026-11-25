@@ -1,0 +1,291 @@
+name: CI & Universal Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows-x64:
+    name: Build Rust (Windows x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x64
+
+      - name: Test Rust workspace (Windows x86_64)
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v3"
+        run: cargo test --workspace --release
+
+      - name: Build Rust workspace (Windows x86_64)
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v3"
+        run: cargo build --workspace --release
+
+      - name: Upload Windows x86_64 native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-windows-x86_64
+          if-no-files-found: error
+          path: |
+            target/release/spica_rust_native.dll
+            target/release/spica-launcher.exe
+
+  build-linux-x64:
+    name: Build Rust (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-x64
+
+      - name: Test Rust workspace (Linux x86_64)
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v3"
+        run: cargo test --workspace --release
+
+      - name: Build Rust workspace (Linux x86_64)
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v3"
+        run: cargo build --workspace --release
+
+      - name: Upload Linux x86_64 native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-x86_64
+          if-no-files-found: error
+          path: |
+            target/release/libspica_rust_native.so
+            target/release/spica-launcher
+
+  build-linux-arm64:
+    name: Build Rust (Linux aarch64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install aarch64 cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+
+      - name: Setup Rust stable toolchain (aarch64-unknown-linux-gnu)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-arm64
+
+      - name: Build Rust workspace (Linux aarch64)
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+        run: cargo build --workspace --release --target aarch64-unknown-linux-gnu
+
+      - name: Upload Linux aarch64 native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-aarch64
+          if-no-files-found: error
+          path: |
+            target/aarch64-unknown-linux-gnu/release/libspica_rust_native.so
+            target/aarch64-unknown-linux-gnu/release/spica-launcher
+
+  package-universal-jar:
+    name: Package Universal Purpur Plugin JAR
+    runs-on: ubuntu-latest
+    needs:
+      - build-windows-x64
+      - build-linux-x64
+      - build-linux-arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: spica-rust-native-plugin/pom.xml
+
+      - name: Download Windows x86_64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: native-windows-x86_64
+          path: staging/windows-x86_64
+
+      - name: Download Linux x86_64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x86_64
+          path: staging/linux-x86_64
+
+      - name: Download Linux aarch64 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux-aarch64
+          path: staging/linux-aarch64
+
+      - name: Stage native libraries into plugin resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            spica-rust-native-plugin/src/main/resources/native/windows-x86_64 \
+            spica-rust-native-plugin/src/main/resources/native/linux-x86_64 \
+            spica-rust-native-plugin/src/main/resources/native/linux-aarch64
+
+          cp -f staging/windows-x86_64/spica_rust_native.dll \
+            spica-rust-native-plugin/src/main/resources/native/windows-x86_64/spica_rust_native.dll
+          cp -f staging/linux-x86_64/libspica_rust_native.so \
+            spica-rust-native-plugin/src/main/resources/native/linux-x86_64/libspica_rust_native.so
+          cp -f staging/linux-aarch64/libspica_rust_native.so \
+            spica-rust-native-plugin/src/main/resources/native/linux-aarch64/libspica_rust_native.so
+
+      - name: Build universal Purpur plugin JAR with Maven
+        working-directory: spica-rust-native-plugin
+        run: mvn -B clean package
+
+      - name: Verify embedded native libraries in universal JAR
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          jars=(spica-rust-native-plugin/target/SpicaRustNative-*.jar)
+          if [[ ${#jars[@]} -ne 1 ]]; then
+            echo "ERROR: Expected exactly 1 SpicaRustNative-*.jar, found ${#jars[@]}: ${jars[*]}" >&2
+            exit 1
+          fi
+
+          JAR_FILE="${jars[0]}"
+          echo "Inspecting JAR: ${JAR_FILE}"
+          JAR_CONTENTS="$(jar tf "${JAR_FILE}")"
+
+          for expected in \
+            "native/windows-x86_64/spica_rust_native.dll" \
+            "native/linux-x86_64/libspica_rust_native.so" \
+            "native/linux-aarch64/libspica_rust_native.so"; do
+            if ! grep -qxF "${expected}" <<< "${JAR_CONTENTS}"; then
+              echo "ERROR: Missing expected native library in JAR: ${expected}" >&2
+              echo "${JAR_CONTENTS}" >&2
+              exit 1
+            fi
+            echo "Verified embedded native library: ${expected}"
+          done
+
+      - name: Assemble release-dist bundle and SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          jars=(spica-rust-native-plugin/target/SpicaRustNative-*.jar)
+          if [[ ${#jars[@]} -ne 1 ]]; then
+            echo "ERROR: Expected exactly 1 SpicaRustNative-*.jar, found ${#jars[@]}: ${jars[*]}" >&2
+            exit 1
+          fi
+
+          rm -rf release-dist
+          mkdir -p release-dist
+
+          cp -f "${jars[0]}" release-dist/SpicaRustNative-universal.jar
+          cp -f staging/windows-x86_64/spica-launcher.exe release-dist/spica-launcher-windows-x86_64.exe
+          cp -f staging/linux-x86_64/spica-launcher release-dist/spica-launcher-linux-x86_64
+          cp -f staging/linux-aarch64/spica-launcher release-dist/spica-launcher-linux-aarch64
+
+          chmod +x \
+            release-dist/spica-launcher-linux-x86_64 \
+            release-dist/spica-launcher-linux-aarch64
+
+          (
+            cd release-dist
+            sha256sum \
+              SpicaRustNative-universal.jar \
+              spica-launcher-windows-x86_64.exe \
+              spica-launcher-linux-x86_64 \
+              spica-launcher-linux-aarch64 \
+              > SHA256SUMS.txt
+          )
+
+          echo "=== release-dist contents ==="
+          ls -lh release-dist
+          echo "=== SHA256SUMS.txt ==="
+          cat release-dist/SHA256SUMS.txt
+
+      - name: Upload release bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          if-no-files-found: error
+          path: release-dist/
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - package-universal-jar
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: release-dist
+
+      - name: Verify release bundle checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd release-dist
+            sha256sum -c SHA256SUMS.txt
+          )
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-dist/SpicaRustNative-universal.jar
+            release-dist/spica-launcher-windows-x86_64.exe
+            release-dist/spica-launcher-linux-x86_64
+            release-dist/spica-launcher-linux-aarch64
+            release-dist/SHA256SUMS.txt

@@ -28,7 +28,7 @@ import java.util.logging.Logger;
  */
 public final class BrainIpcClient {
 
-    public static final String PLUGIN_VERSION = "2.1.0";
+    public static final String PLUGIN_VERSION = "2.2.0";
     public static final String SERVER_FLAVOR = "purpur-1.21.4";
 
     private static final int CONNECT_TIMEOUT_MS = 3_000;

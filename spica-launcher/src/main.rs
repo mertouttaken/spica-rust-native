@@ -189,8 +189,8 @@ async fn main() -> ExitCode {
         );
         if cfg.brain.enable_metrics_http {
             println!(
-                "[Dry-Run] Metrik HTTP    : http://127.0.0.1:{}/status | /metrics",
-                cfg.brain.metrics_port
+                "[Dry-Run] Dashboard HTTP : http://{}:{} (Dashboard | /status | /metrics)",
+                "127.0.0.1", cfg.brain.metrics_port
             );
         }
         println!("[Dry-Run] Uretilen Komut :");
@@ -265,8 +265,8 @@ async fn main() -> ExitCode {
         {
             Ok(h) => {
                 println!(
-                    "[SpicaMetrics] HTTP sunucusu aktif: http://127.0.0.1:{}/status & /metrics",
-                    cfg.brain.metrics_port
+                    "[SpicaMetrics] Canli Dashboard aktif: http://{}:{} (Dashboard | /status | /metrics)",
+                    "127.0.0.1", cfg.brain.metrics_port
                 );
                 Some(h)
             }

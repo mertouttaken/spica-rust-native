@@ -90,7 +90,8 @@ spica-rust-native/
 - [x] Rust başlatıcı + ZGC/Aikar profilleyici + Brain IPC + HTTP `/status` & `/metrics` (`spica-launcher`)
 - [x] Purpur 1.21.4 A/B performans testi ve doğrulama
 - [x] v2.1.0 Canlı Mob-Farm & Köylü (Villager) Frenleme Motoru (otomatik çarpışma/AI kısma, oyuncu etkileşiminde anlık uyanma, periyodik restock nabzı, `/rustbridge farms` + Prometheus metrikleri)
-- [ ] Gömülü Canlı Web Dashboard (`127.0.0.1:9120/` grafikli arayüz, 0 JVM yükü)
-- [ ] Linux x86_64 / aarch64 CI (GitHub Actions) ile otomatik çift platform `.jar` (hem `.dll` hem `.so` gömülü)
+- [x] v2.2.0 Gömülü Canlı Web Dashboard (`http://127.0.0.1:9120/` + 120s MSPT/EWMA/TPS grafik ring-buffer, sıfır CDN, 0 JVM yükü)
+- [x] v2.2.0 GitHub Actions CI/CD (`.github/workflows/ci-release.yml` — Windows x64 + Linux x64 + Linux ARM64 tek **Universal JAR** + otomatik GitHub Release)
+- [ ] Oto Purpur 1.21.4 indirici + Discord Webhook crash/lag alarmları (`spica-launcher`)
 - [ ] Web panel / Grafana hazır Prometheus dashboard şablonu
 - [ ] Özel chunk/şematik toplu blok hesaplayıcı ve Rust tabanlı anti-bot/paket ön filtresi

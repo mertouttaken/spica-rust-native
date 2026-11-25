@@ -1,5 +1,5 @@
 name: SpicaRustNative
-version: 2.1.0
+version: 2.2.0
 main: net.spicanetwork.rustnative.SpicaRustNativePlugin
 api-version: '1.21'
 description: Purpur 1.21.4 Execution Core + Rust Brain + Farm & Villager Governor (Zero-copy Spatial Hash/Rayon + spica-launcher IPC)

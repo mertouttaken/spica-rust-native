@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    SpicaRustNative v2.1 Windows x86_64 build script
+    SpicaRustNative v2.2 Windows x86_64 build script
     Derler:
       1. spica_rust_native.dll        (In-Process Rust Brain Engine - Spatial Hash + Rayon + Governor)
       2. spica-launcher.exe      (Rust Startup Orchestrator, Supervisor & Brain IPC/HTTP Daemon)
-      3. SpicaRustNative-2.1.0.jar (Purpur 1.21.4 Plugin, .dll gomulu)
+      3. SpicaRustNative-2.2.0.jar (Purpur 1.21.4 Plugin, .dll gomulu)
 #>
 
 param(
@@ -63,15 +63,15 @@ try {
 
 Write-Host "`n[4/4] Ciktilar dist/windows-x86_64 klasorune toplaniyor..." -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
-$JarPath = Join-Path $PluginDir "target\SpicaRustNative-2.1.0.jar"
-Copy-Item -Force $JarPath (Join-Path $DistDir "SpicaRustNative-2.1.0.jar")
+$JarPath = Join-Path $PluginDir "target\SpicaRustNative-2.2.0.jar"
+Copy-Item -Force $JarPath (Join-Path $DistDir "SpicaRustNative-2.2.0.jar")
 Copy-Item -Force $LauncherPath (Join-Path $DistDir "spica-launcher.exe")
 Copy-Item -Force $DllPath (Join-Path $DistDir "spica_rust_native.dll")
 
 Write-Host "`nTAMAMLANDI!" -ForegroundColor Green
 Write-Host "  Rust Launcher : $DistDir\spica-launcher.exe"
-Write-Host "  Purpur Plugin : $DistDir\SpicaRustNative-2.1.0.jar"
+Write-Host "  Purpur Plugin : $DistDir\SpicaRustNative-2.2.0.jar"
 Write-Host "  Native Engine : $DistDir\spica_rust_native.dll"
 Write-Host "`nKullanim:" -ForegroundColor Yellow
-Write-Host "  1. SpicaRustNative-2.1.0.jar -> Purpur 1.21.4 sunucunun plugins/ klasorune at"
+Write-Host "  1. SpicaRustNative-2.2.0.jar -> Purpur 1.21.4 sunucunun plugins/ klasorune at"
 Write-Host "  2. spica-launcher.exe        -> purpur-1.21.4.jar yanina koy ve calistir"

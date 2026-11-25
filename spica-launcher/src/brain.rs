@@ -1,9 +1,11 @@
 use crate::config::BrainConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::time::Instant;
 
 pub const EWMA_ALPHA: f64 = 0.25;
 const HYSTERESIS_RECOVERY_TICKS: u8 = 2;
+pub const HISTORY_CAPACITY: usize = 120;
 
 /// Severity state of the adaptive Rust Brain Governor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -159,6 +161,24 @@ pub struct BrainSnapshot {
     pub uptime_secs: u64,
 }
 
+/// Single historical telemetry sample kept in the 120-second ring buffer.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetrySample {
+    pub uptime_secs: u64,
+    pub mspt: f64,
+    pub ewma_mspt: f64,
+    pub tps: f64,
+    pub entities: u32,
+    pub hibernated: u32,
+    pub farm_throttled: u32,
+    pub villagers_throttled: u32,
+    pub players: u32,
+    pub heap_used_mb: u64,
+    pub host_cpu_pct: f32,
+    pub state_code: u8,
+}
+
 /// Shared adaptive Brain state protected by `Arc<Mutex<BrainState>>`.
 #[derive(Debug)]
 pub struct BrainState {
@@ -192,6 +212,7 @@ pub struct BrainState {
     config: BrainConfig,
     next_conn_id: u64,
     active_conn_id: u64,
+    history: VecDeque<TelemetrySample>,
 }
 
 fn round1(value: f64) -> f64 {
@@ -298,6 +319,7 @@ impl BrainState {
             config,
             next_conn_id: 0,
             active_conn_id: 0,
+            history: VecDeque::with_capacity(HISTORY_CAPACITY),
         }
     }
 
@@ -390,7 +412,31 @@ impl BrainState {
         self.state = self.level.as_str().to_string();
         self.state_code = self.level.code();
         self.directive = build_directive(self.level, self.ewma_mspt, &self.config);
+
+        if self.history.len() >= HISTORY_CAPACITY {
+            self.history.pop_front();
+        }
+        self.history.push_back(TelemetrySample {
+            uptime_secs: self.uptime_secs,
+            mspt: self.mspt,
+            ewma_mspt: round1(self.ewma_mspt),
+            tps: self.tps,
+            entities: self.entities,
+            hibernated: self.hibernated,
+            farm_throttled: self.farm_throttled,
+            villagers_throttled: self.villagers_throttled,
+            players: self.players,
+            heap_used_mb: self.heap_used_mb,
+            host_cpu_pct: (self.host_cpu_pct * 10.0).round() / 10.0,
+            state_code: self.state_code,
+        });
+
         self.directive.clone()
+    }
+
+    /// Returns a chronological snapshot of up to the last 120 telemetry samples.
+    pub fn history_snapshot(&self) -> Vec<TelemetrySample> {
+        self.history.iter().cloned().collect()
     }
 
     /// Produces a fresh serializable snapshot of all Brain & Host metrics.
@@ -592,5 +638,44 @@ mod tests {
             serde_json::to_value(&brain.snapshot()).expect("serialize legacy snapshot");
         assert_eq!(legacy_snap_json["farmThrottled"], 0);
         assert_eq!(legacy_snap_json["villagersThrottled"], 0);
+    }
+
+    #[test]
+    fn test_history_ring_buffer_caps_at_120_and_preserves_newest() {
+        let mut brain = BrainState::new(BrainConfig::default(), 4096, 16384);
+        brain.update_host_metrics(28.4, 5120, 16384);
+
+        for tick in 1u32..=150 {
+            let payload = TelemetryPayload {
+                mspt: 15.0 + (tick % 30) as f64,
+                tps: 20.0,
+                entities: tick,
+                hibernated: tick / 2,
+                farm_throttled: tick / 3,
+                villagers_throttled: tick / 5,
+                players: 10,
+                loaded_chunks: 1000,
+                heap_used_mb: 2048 + tick as u64,
+                heap_max_mb: 8192,
+            };
+            let _ = brain.ingest_telemetry(&payload);
+        }
+
+        let history = brain.history_snapshot();
+        assert_eq!(history.len(), 120);
+        assert_eq!(history.first().expect("oldest retained sample").entities, 31);
+        assert_eq!(history.last().expect("newest retained sample").entities, 150);
+        assert_eq!(history.last().expect("newest retained sample").heap_used_mb, 2198);
+        assert!((history.last().expect("newest retained sample").host_cpu_pct - 28.4).abs() < 0.05);
+
+        let sample_json =
+            serde_json::to_value(history.last().expect("last sample")).expect("serialize sample");
+        assert!(sample_json.get("uptimeSecs").is_some());
+        assert!(sample_json.get("ewmaMspt").is_some());
+        assert!(sample_json.get("farmThrottled").is_some());
+        assert!(sample_json.get("villagersThrottled").is_some());
+        assert!(sample_json.get("heapUsedMb").is_some());
+        assert!(sample_json.get("hostCpuPct").is_some());
+        assert!(sample_json.get("stateCode").is_some());
     }
 }

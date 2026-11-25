@@ -1,4 +1,5 @@
-use crate::brain::{BrainSnapshot, BrainState};
+use crate::brain::{BrainSnapshot, BrainState, TelemetrySample};
+use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8,6 +9,13 @@ use tokio::task::JoinHandle;
 
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_HTTP_REQ_BYTES: usize = 4096;
+const DASHBOARD_HTML: &str = include_str!("dashboard.html");
+
+#[derive(Serialize)]
+struct HistoryResponse<'a> {
+    snapshot: &'a BrainSnapshot,
+    history: &'a [TelemetrySample],
+}
 
 /// Binds the lightweight HTTP/1.1 metrics & status server on `127.0.0.1:<port>`.
 pub async fn start_metrics_server(
@@ -80,13 +88,41 @@ async fn handle_http_connection(mut stream: TcpStream, brain: Arc<Mutex<BrainSta
     }
 
     let head_only = method == "HEAD";
-    let snapshot = match brain.lock() {
-        Ok(guard) => guard.snapshot(),
-        Err(poisoned) => poisoned.into_inner().snapshot(),
-    };
 
     match path {
+        "/" | "/dashboard" => {
+            let _ = write_http_response(
+                &mut stream,
+                "200 OK",
+                "text/html; charset=utf-8",
+                DASHBOARD_HTML,
+                head_only,
+            )
+            .await;
+        }
+        "/history" => {
+            let (snapshot, history) = match brain.lock() {
+                Ok(guard) => (guard.snapshot(), guard.history_snapshot()),
+                Err(poisoned) => {
+                    let guard = poisoned.into_inner();
+                    (guard.snapshot(), guard.history_snapshot())
+                }
+            };
+            let body = render_history_json(&snapshot, &history);
+            let _ = write_http_response(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                &body,
+                head_only,
+            )
+            .await;
+        }
         "/status" => {
+            let snapshot = match brain.lock() {
+                Ok(guard) => guard.snapshot(),
+                Err(poisoned) => poisoned.into_inner().snapshot(),
+            };
             let body = serde_json::to_string_pretty(&snapshot)
                 .unwrap_or_else(|_| "{\"error\":\"serialization_failed\"}".to_string());
             let _ = write_http_response(
@@ -99,6 +135,10 @@ async fn handle_http_connection(mut stream: TcpStream, brain: Arc<Mutex<BrainSta
             .await;
         }
         "/metrics" => {
+            let snapshot = match brain.lock() {
+                Ok(guard) => guard.snapshot(),
+                Err(poisoned) => poisoned.into_inner().snapshot(),
+            };
             let body = render_prometheus_metrics(&snapshot);
             let _ = write_http_response(
                 &mut stream,
@@ -114,7 +154,7 @@ async fn handle_http_connection(mut stream: TcpStream, brain: Arc<Mutex<BrainSta
                 &mut stream,
                 "404 Not Found",
                 "text/plain; charset=utf-8",
-                "Spica Launcher Metrics HTTP\nEndpoints:\n  GET /status\n  GET /metrics\n",
+                "Spica Launcher Metrics HTTP\nEndpoints:\n  GET /\n  GET /dashboard\n  GET /history\n  GET /status\n  GET /metrics\n",
                 head_only,
             )
             .await;
@@ -145,6 +185,13 @@ async fn write_http_response(
         stream.write_all(body.as_bytes()).await?;
     }
     stream.flush().await
+}
+
+/// Serializes the combined live `BrainSnapshot` and 120-second `TelemetrySample` history for `/history`.
+pub fn render_history_json(snapshot: &BrainSnapshot, history: &[TelemetrySample]) -> String {
+    let payload = HistoryResponse { snapshot, history };
+    serde_json::to_string(&payload)
+        .unwrap_or_else(|_| "{\"error\":\"serialization_failed\"}".to_string())
 }
 
 /// Formats `BrainSnapshot` into standard Prometheus exposition format.
@@ -260,5 +307,53 @@ mod tests {
         ] {
             assert!(text.contains(metric), "Missing metric: {}", metric);
         }
+    }
+
+    #[test]
+    fn embedded_dashboard_contains_brand_and_history_endpoint() {
+        assert!(
+            DASHBOARD_HTML.contains("SpicaRustNative"),
+            "Dashboard HTML must contain SpicaRustNative branding"
+        );
+        assert!(
+            DASHBOARD_HTML.contains("/history"),
+            "Dashboard HTML must poll /history endpoint"
+        );
+    }
+
+    #[test]
+    fn render_history_json_contains_snapshot_and_history_keys() {
+        let mut brain = BrainState::new(BrainConfig::default(), 4096, 16384);
+        brain.update_host_metrics(22.5, 5000, 16384);
+        brain.ingest_telemetry(&TelemetryPayload {
+            mspt: 19.2,
+            tps: 20.0,
+            entities: 250,
+            hibernated: 60,
+            farm_throttled: 12,
+            villagers_throttled: 6,
+            players: 8,
+            loaded_chunks: 900,
+            heap_used_mb: 1800,
+            heap_max_mb: 8192,
+        });
+
+        let snap = brain.snapshot();
+        let history = brain.history_snapshot();
+        let json_str = render_history_json(&snap, &history);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("render_history_json must produce valid JSON");
+
+        assert!(parsed.get("snapshot").is_some(), "Missing snapshot key");
+        assert!(parsed.get("history").is_some(), "Missing history key");
+        assert_eq!(parsed["snapshot"]["entities"], 250);
+        assert_eq!(parsed["snapshot"]["farmThrottled"], 12);
+        let hist_arr = parsed["history"]
+            .as_array()
+            .expect("history must be a JSON array");
+        assert_eq!(hist_arr.len(), 1);
+        assert_eq!(hist_arr[0]["entities"], 250);
+        assert_eq!(hist_arr[0]["farmThrottled"], 12);
+        assert_eq!(hist_arr[0]["villagersThrottled"], 6);
     }
 }
