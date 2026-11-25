@@ -196,7 +196,9 @@ snapshot_command = ["/absolute/path/to/snapshot-provider"]
 worlds = ["world", "world_nether", "world_the_end"]
 ```
 
-After a matching Purpur `save-all flush` result, the launcher runs the configured command with `create <server-root> <staging> <world>...` appended. The provider must expose one immutable point-in-time view covering all listed worlds under `<staging>/view/<world>`. Use a filesystem or volume snapshot. If the worlds span volumes, the provider must capture them as a consistent group. The provider runs under the launcher account and needs the appropriate snapshot permissions. The launcher never modifies any world's autosave flag.
+Spica prepares autosave-enabled worlds on separate ticks using Paper's `World.save(false)`. This queues chunk writes before the final checkpoint and can fire an additional `WorldSaveEvent` for a prepared world. Set the plugin's `backup.prepare-checkpoint` to `false` to go straight to the final flush. The final `save-all flush` covers all worlds and player data, including changes during preparation. The launcher requires the matching success response and rejects a checkpoint if Purpur reports a save error during it. Autosave flags are preserved.
+
+After the checkpoint, the launcher runs the configured command with `create <server-root> <staging> <world>...` appended. The provider must expose one immutable point-in-time view covering all listed worlds under `<staging>/view/<world>`. Use a filesystem or volume snapshot. If the worlds span volumes, the provider must capture them as a consistent group. The provider runs under the launcher account and needs the appropriate snapshot permissions.
 
 The launcher archives the view and then calls the same command with `release <server-root> <staging> <world>...`. Release must also handle an interrupted or failed create. Each command has a 60-second limit. The provider should execute in the foreground and remove the view or mount during release. The launcher removes the staging directory once it is empty.
 

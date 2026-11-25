@@ -26,9 +26,9 @@ enum SupervisorAction {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct CheckpointEvent {
-    id: String,
-    saved: bool,
+enum CheckpointEvent {
+    Result { id: String, saved: bool },
+    WriteFailure,
 }
 
 enum BackupPhase {
@@ -36,6 +36,7 @@ enum BackupPhase {
     WaitingCheckpoint {
         id: String,
         deadline: tokio::time::Instant,
+        write_failed: bool,
     },
     Archiving {
         cancel_gate: Arc<BackupCancelGate>,
@@ -136,9 +137,8 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
-/// Strictly validates that the prefix before `"INFO]: "` is a real Purpur/Paper server
-/// timestamp/thread log header (e.g. `"[15:20:01 "` or `"[15:20:01] [Server thread/"`).
-fn is_valid_server_info_prefix(prefix: &str) -> bool {
+/// Validates a Purpur/Paper timestamp and optional thread name before the log level.
+fn is_valid_server_log_prefix(prefix: &str, allow_worker: bool) -> bool {
     let b = prefix.as_bytes();
     // Standard Purpur/Paper format: "[HH:MM:SS " (10 bytes before "INFO]: ")
     let valid_hms = b.len() >= 10
@@ -157,15 +157,51 @@ fn is_valid_server_info_prefix(prefix: &str) -> bool {
     if b.len() == 10 && b[9] == b' ' {
         return true;
     }
-    // Classic Spigot/Vanilla format: "[HH:MM:SS] [Server thread/"
-    &prefix[9..] == "] [Server thread/"
+    // Classic format includes a thread. Save errors can come from region I/O workers.
+    prefix[9..]
+        .strip_prefix("] [")
+        .and_then(|name| name.strip_suffix('/'))
+        .is_some_and(|name| {
+            name == "Server thread"
+                || (allow_worker && !name.is_empty() && !name.contains(['[', ']']))
+        })
 }
 
 /// Only a structured checkpoint result for the requested ID can start a backup.
 fn detect_checkpoint_event(line: &str) -> Option<CheckpointEvent> {
     let clean = strip_ansi(line);
-    let (prefix, msg) = clean.trim_end().split_once("INFO]: ")?;
-    if !is_valid_server_info_prefix(prefix) {
+    let clean = clean.trim_end();
+    if let Some((prefix, msg)) = clean
+        .split_once("ERROR]: ")
+        .or_else(|| clean.split_once("WARN]: "))
+    {
+        // Paper's console can prefix the message with the short logger name.
+        let msg = msg
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once("] "))
+            .map_or(msg, |(_, message)| message);
+        // Purpur 1.21.4 can log these save failures and still report save-all success.
+        const SAVE_FAILURE_PREFIXES: &[&str] = &[
+            "Failed to save chunk (",
+            "Failed to save chunk data (",
+            "Failed to save entity data (",
+            "Failed to save poi data (",
+            "Failed to write chunk data for task: ",
+            "Exception when flushing regions in world ",
+            "Could not save data to ",
+            "Failed to save level ",
+            "Failed to save player data for ",
+        ];
+        if is_valid_server_log_prefix(prefix, true)
+            && SAVE_FAILURE_PREFIXES
+                .iter()
+                .any(|start| msg.starts_with(start))
+        {
+            return Some(CheckpointEvent::WriteFailure);
+        }
+    }
+    let (prefix, msg) = clean.split_once("INFO]: ")?;
+    if !is_valid_server_log_prefix(prefix, false) {
         return None;
     }
     let (id, status) = msg
@@ -179,7 +215,7 @@ fn detect_checkpoint_event(line: &str) -> Option<CheckpointEvent> {
         "failed" => false,
         _ => return None,
     };
-    Some(CheckpointEvent {
+    Some(CheckpointEvent::Result {
         id: id.to_string(),
         saved,
     })
@@ -300,6 +336,7 @@ async fn initiate_backup_transaction(
         id,
         deadline: tokio::time::Instant::now()
             + Duration::from_millis(config.flush_wait_ms.max(MIN_FLUSH_ACK_TIMEOUT_MS)),
+        write_failed: false,
     };
 }
 
@@ -488,13 +525,24 @@ pub async fn run_supervisor(
                     break status;
                 }
                 Some(event) = save_ev_rx.recv() => {
-                    if matches!(&backup_phase, BackupPhase::WaitingCheckpoint { id, deadline }
-                        if *id == event.id && tokio::time::Instant::now() < *deadline)
-                        && requested_action == SupervisorAction::None
-                    {
-                        if !event.saved {
+                    if let BackupPhase::WaitingCheckpoint { id, deadline, write_failed } = &mut backup_phase {
+                        let (result_id, saved) = match event {
+                            CheckpointEvent::Result { id, saved } => (id, saved),
+                            CheckpointEvent::WriteFailure => {
+                                *write_failed = true;
+                                continue;
+                            }
+                        };
+                        if *id != result_id || tokio::time::Instant::now() >= *deadline
+                            || requested_action != SupervisorAction::None
+                        {
+                            continue;
+                        }
+                        if !saved || *write_failed {
+                            let reason = if *write_failed { "Purpur yazma hatasi bildirdi." }
+                                else { "Purpur kayit noktasi basarisiz." };
                             backup_phase = BackupPhase::Idle;
-                            eprintln!("[SpicaBackup] HATA: Purpur kayit noktasi basarisiz.");
+                            eprintln!("[SpicaBackup] HATA: {reason}");
                             continue;
                         }
                         let cancel_gate = Arc::new(BackupCancelGate::new());
@@ -504,7 +552,7 @@ pub async fn run_supervisor(
                         let config = cfg.backup.clone();
                         tokio::spawn(async move {
                             let result = create_snapshot_backup(
-                                &work_dir, &config, &event.id, worker_gate,
+                                &work_dir, &config, &result_id, worker_gate,
                             ).await;
                             let _ = tx.send(result);
                         });
@@ -810,7 +858,7 @@ mod tests {
         let valid = format!("[15:20:01 INFO]: [SpicaRustNative] SpicaBackup checkpoint {id} saved");
         assert_eq!(
             detect_checkpoint_event(&valid),
-            Some(CheckpointEvent {
+            Some(CheckpointEvent::Result {
                 id: id.clone(),
                 saved: true
             })
@@ -820,7 +868,7 @@ mod tests {
         );
         assert_eq!(
             detect_checkpoint_event(&failed),
-            Some(CheckpointEvent {
+            Some(CheckpointEvent::Result {
                 id: id.clone(),
                 saved: false
             })
@@ -837,6 +885,28 @@ mod tests {
             detect_checkpoint_event(&valid.replace(&id, "invalid")),
             None
         );
+    }
+
+    #[test]
+    fn checkpoint_detects_save_errors_from_server_and_io_threads() {
+        for line in [
+            "[15:20:01 ERROR]: Failed to save chunk data (11,-8) in world 'world'",
+            "[15:20:01 ERROR]: [MoonriseRegionFileIO] Failed to write chunk data for task: test",
+            "[15:20:01] [Region I/O Worker #1/ERROR]: Failed to write chunk data for task: test",
+            "[15:20:01 WARN]: Failed to save player data for SpicaBot001",
+        ] {
+            assert_eq!(
+                detect_checkpoint_event(line),
+                Some(CheckpointEvent::WriteFailure)
+            );
+        }
+        for line in [
+            "[15:20:01 INFO]: <Player> [15:20:01 ERROR]: Failed to save level world",
+            "[15:20:01 ERROR]: Unrelated startup failure",
+            "[garbled] [Region I/O Worker #1/ERROR]: Failed to write chunk data for task: test",
+        ] {
+            assert_eq!(detect_checkpoint_event(line), None);
+        }
     }
 
     #[test]
