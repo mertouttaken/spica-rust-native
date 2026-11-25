@@ -41,75 +41,73 @@
 
 ---
 
-## Measured Benchmark Results (Purpur 1.21.4)
+## Measured Benchmark Results (Purpur 1.21.4 — v2.6.0)
 
-All tests below were executed on the same host (**Windows x86_64, 8 logical cores, 16 GB RAM, OpenJDK 21.0.13 LTS, `-Xms2048M -Xmx2048M`**) against an identical cloned Purpur 1.21.4 stress world (**809 persistent AI mobs + ~240 ground items = 1,052 entities, 169 force-loaded chunks**).
+All A/B tests below were executed on the same host (**Windows x86_64, 8 logical cores, 16 GB RAM, OpenJDK 21.0.13 LTS, identical `spica-launcher.exe` Aikar Tuned G1GC `-Xms2048M -Xmx2048M` flags**) against an identical cloned Purpur 1.21.4 heavy stress world (**`world-heavy-v24-snapshot`**: **~1,126 persistent mobs** — 3×120 hyper-cramped farm mobs in 3×3 chambers, 48 trading-hall villagers, 600 outer roaming mobs — plus **300 ground items**, 169 force-loaded chunks).
 
-### 1. Live Purpur 1.21.4 Heavy Stress A/B Test (v2.4.0 — Dense Mob Farms + 8-TNT Burst)
+### 1. Live Purpur 1.21.4 A/B Stress Test: Pure Purpur vs. `SpicaRustNative v2.6.0` (`05d2b91`)
 
-Executed on an identical cloned heavy stress world (**360 hyper-cramped mob-farm entities in 3×3 chambers + ~609 roaming mobs + 300 ground items, 169 force-loaded chunks, plus an 8-TNT detonation on 486 cobblestone blocks at t=25s**; same OpenJDK 21, `-Xms2048M -Xmx2048M`):
+Workload per run (identical cloned world restored before each run):
+1. **Phase 1 (20 Live Steady-State Bots):** `spica-bot-bench` (Minecraft 1.21.4, Protocol 769) connecting **20/20** bots (`0` failures, `0` disconnects, `exit=0`, `3s` warmup + `15s` steady-state measurement = `300.1` active bot-seconds).
+2. **Phase 2 (8-TNT Chain Explosion + 15s Recovery):** 8 TNTs detonated on a cobblestone tower, followed by 15s post-explosion recovery sampling.
 
-| Phase / Metric | Pure Purpur 1.21.4 (No Rust) | Purpur + `SpicaRustNative v2.4.0` | Improvement |
+| Metric (Identical World, JVM & 20-Bot Workload) | Pure Purpur 1.21.4 (No Rust) | Purpur + `SpicaRustNative v2.6.0` | Improvement |
 | :--- | :---: | :---: | :---: |
-| **Server Boot Time (`Done`)** | `43.53 s` | **`31.78 s`** | **27.0% faster** (`-11.75 s`) |
-| **Phase 1: Pre-Explosion Avg MSPT (t=10–25s)** | `13.53 ms` | **`6.08 ms`** | **55.1% lower MSPT (2.23x)** |
-| **Phase 2: 8-TNT Burst 5s Window Avg MSPT** | `25.2 ms` (10s: `17.8 ms`) | **`11.2 ms`** (10s: `7.4 ms`) | **55.6% lower MSPT (2.25x)** |
-| **Phase 3: Post-Explosion Steady Avg MSPT (t=35–50s)** | `12.03 ms` (rising to `14.8 ms`) | **`2.50 ms`** (steady `2.3 ms`) | **79.2% lower MSPT (4.81x)** |
-| **Overall 50s Mean MSPT (all 9 samples)** | `14.16 ms` | **`5.06 ms`** | **64.3% lower MSPT (2.80x)** |
-| **1-Minute Cumulative Avg MSPT (t=50s)** | `14.9 ms` | **`8.2 ms`** | **45.0% lower MSPT** |
-| **Steady-State Min Tick Time** | `6.9 – 9.9 ms` | **`1.0 – 1.1 ms`** | **~7x lower floor** |
-| **Rust Actions Taken Live** | — | `498` farm mobs collision+AI throttled, `283` ground items merged | 0.426 ms Rust compute |
+| **Server Boot Time (`Done`)** | `30.93 s` | **`23.04 s`** | **25.5% faster** (`-7.89 s`) |
+| **20-Bot Steady-State MSPT (5s avg)** | `35.8 ms` (`26.9`–`58.7`) | **`10.8 ms`** (`8.0`–`14.7`) | **-69.8% MSPT (3.31× lower)** |
+| **20-Bot Steady-State MSPT (10s avg)** | `36.1 ms` | **`11.4 ms`** | **-68.4% MSPT (3.17× lower)** |
+| **20-Bot Steady-State Max Tick Spike** | `58.7 ms` | **`14.7 ms`** | **-75.0% spike reduction** |
+| **Join Burst Worst 5s TPS / Max Tick** | `8.61 TPS` / `763.2 ms` | **`12.11 TPS` / `486.2 ms`** | **+40.6% TPS**, **-36.3% peak** |
+| **Post-TNT Recovery MSPT (5s avg)** | `8.0 ms` (`6.5`–`14.1`) | **`2.9 ms`** (`1.4`–`5.7`) | **-63.8% MSPT (2.76× lower)** |
+| **Overall 1-Minute Avg MSPT** | `24.5 ms` | **`12.2 ms`** | **-50.2% MSPT (2.01× lower)** |
+| **JVM Total CPU Time (Phase 1 / 27.4s wall)** | `111.69 cpu-s` | **`59.61 cpu-s`** | **-46.6% CPU** |
+| **JVM Total CPU Time (Full Run)** | `119.66 cpu-s` | **`63.27 cpu-s`** | **-47.1% CPU** |
+| **Bot p95 Join Latency (`p95JoinMs`)** | `3,922 ms` | **`2,162 ms`** | **-44.9% faster join** |
+| **Entity Packets Delivered (20 bots, 15s)** | `5,996,915` (`19,984.9 /bot·s`) | **`129,718` (`432.2 /bot·s`)** | **-97.8% entity packets (46.2×)** |
+| **Server Outbound Bandwidth (20 bots)** | `4,315.7 KB/s` | **`138.2 KB/s`** | **-96.8% bandwidth (31.2×)** |
+| **Avg JVM RSS Memory** | `2,440.2 MB` | `2,476.8 MB` | `+36.6 MB` (+1.5% off-heap) |
 
-**Full 5-second `/mspt` avg timeline (t=10s → t=50s, 8-TNT burst at t=25s):**
-- **Without Rust:** `18.6` → `15.5` → `9.6` → `10.4` → `[TNT] 25.2` → `8.6` → `11.3` → `13.4` → `14.8 ms`
-- **With Rust v2.4.0:** `10.7` → `5.1` → `4.8` → `3.7` → `[TNT] 11.2` → `2.7` → `2.6` → `2.4` → `2.3 ms`
+#### Visual A/B Comparison Chart
 
-> **Methodology note:** With 0 connected players during the automated headless test, distant mobs were eligible for AI LOD hibernation (`Mob#setAware(false)`) alongside dense farm collision suppression (`setCollidable(false)`). On populated production servers where mobs close to players stay fully active, real-world MSPT savings typically land in the **20%–35%** range during normal gameplay and **40%–65%+** during mob-farm / explosion / high-density spikes.
+```text
+20-Bot Steady-State 5s MSPT (lower is better)
+  Pure Purpur (No Rust)  │ ████████████████████████████████████ 35.8 ms (max 58.7 ms)
+  SpicaRustNative v2.6.0 │ ███████████                          10.8 ms (max 14.7 ms)  [-69.8%]
 
-### 2. Live In-JVM Benchmark (`/rustbridge bench` & `/rustbridge kernels`)
+JVM Total CPU Time Across Full A/B Run (lower is better)
+  Pure Purpur (No Rust)  │ ████████████████████████████████████ 119.66 cpu-s
+  SpicaRustNative v2.6.0 │ ███████████████████                   63.27 cpu-s           [-47.1%]
 
-Measured directly inside the running Purpur 1.21.4 JVM (**4 Rayon workers**):
+20-Bot Outbound Network Bandwidth (lower is better)
+  Pure Purpur (No Rust)  │ ████████████████████████████████████ 4,315.7 KB/s
+  SpicaRustNative v2.6.0 │ █                                      138.2 KB/s           [-96.8%]
+```
 
-| Workload | Pure Java (Main-Thread Style) | Rust Native (Zero-Copy + Rayon) | Speedup |
+**Full 5-second `/mspt` avg timeline across the A/B run (Idle → 20-Bot Join/Steady-State → 8-TNT Burst → Recovery):**
+- **Without Rust:** `25.2` → `38.6` → `73.2` → `87.0` → `36.7` → `35.8` → `32.6` → `[TNT] 13.5` → `8.6` → `8.0 ms`
+- **With Rust v2.6.0:** `18.2` → `31.5` → `68.9` → `16.9` → `11.5` → `10.8` → `8.1` → `[TNT] 3.4` → `3.0` → `2.9 ms`
+
+> **Methodology & scope note:** This A/B test models a high-density mob-farm / crowded-spawn workload (360 hyper-cramped farm mobs + 600 outer mobs + 20 bots near spawn), where `FarmVillagerGovernor` (556 farm mobs throttled), `EntityLodOptimizer`, and `MobTrackingOptimizer` work together. On lightly loaded SMP servers with spread-out players and low mob density, percentage MSPT and packet reductions will naturally be smaller than in this stress world.
+
+### 2. Live In-JVM Benchmark (`/rustbridge bench 5000 100 30` & `/rustbridge kernels`)
+
+Measured directly inside the running Purpur 1.21.4 JVM (**4 Rayon workers, `abi=2`**):
+
+| Workload | Pure Java (Main-Thread Style) | Rust Native (Zero-Copy + Rayon) | Speedup / Throughput |
 | :--- | :---: | :---: | :---: |
-| **Entity Collisions / Density (5,000 entities)** | `57.756 ms` | **`0.772 ms`** | **74.8x faster (-98.7%)** |
-| **AI Nearest Target + LOD (5,000 × 100)** | `0.784 ms` | **`0.355 ms`** | **2.2x faster (-54.7%)** |
-| **Custom Boids / Flock AI (5,000 entities)** | — | **`2.334 ms/tick`** | 4.7% of a 50ms tick |
-| **Mob Tracking (100p × 2,000m = 200,000 pairs)** | — | **`1.823 ms`** (standalone: `1.117 ms`) | ~0.30 ms/tick @ 6-tick interval |
-| **2D Flow-Field Pathfinding (128×128 w/ wall)** | — | **`2.096 ms`** (standalone: `1.869 ms`) | O(1) per-mob lookup |
-| **Parallel 4-Octave FBM Noise (256×256 = 65,536)** | — | **`2.531 ms`** (standalone: `3.025 ms`) | 256 chunks of terrain |
-| **3D Arena Block Diff (64×64×64 = 262k blocks)** | `4.094 ms` | **`1.144 ms`** (1M standalone: `1.114 ms`) | **3.6x faster (-72.1%)** |
+| **Entity Collisions / Density (5,000 entities)** | `58.147 ms` | **`1.271 ms`** | **45.8× faster (-97.8%)** |
+| **3D Arena Block Diff (64×64×64 = 262,144 blocks)** | `1.798 ms` | **`0.411 ms`** | **4.4× faster (-77.1%)** |
+| **AI Nearest Target + LOD (5,000 × 100)** | `0.795 ms` | **`0.510 ms`** | **1.6× faster (-35.8%)** |
+| **Mob Tracking (100p × 2,000m = 200,000 pairs)** | — | **`1.009 ms`** | ~0.17 ms/tick @ 6-tick interval |
+| **2D Flow-Field Pathfinding (128×128 w/ wall)** | — | **`2.050 ms`** | 16,384 cells, O(1) lookup |
+| **Parallel 4-Octave FBM Noise (256×256 = 65,536)** | — | **`2.563 ms`** | 256 chunks of terrain |
+| **Custom Boids / Flock AI (5,000 entities)** | — | **`3.138 ms/tick`** | SpatialHash + Rayon |
 
-### 3. Live 20-Bot Network Stress Test & World Backup Benchmark (v2.6.0)
+### 3. Verification & Test Suite Status
 
-Executed against a live Purpur 1.21.4 server (~1,169 entities) using the bundled **`spica-bot-bench`** async Minecraft 1.21.4 (**Protocol 769**) bot client (`20/20` bots connected, `0` failures, `0` early disconnects, continuous 250 ms look-vector rotation):
-
-| Metric (20 Live Bots, 16s Window) | Mob Tracking OFF | Mob Tracking ON (`v2.6.0`) | Impact |
-| :--- | :---: | :---: | :---: |
-| **Connected Bots / Early Drops** | `20 / 0` | **`20 / 0`** | 100% stable Protocol 769 |
-| **Live Server TPS / MSPT** | `20.00` | **`20.00` / `16.5 ms`** | `0.280 ms` Rust compute |
-| **Culled `(player, mob)` Tracking Pairs** | `0` | **`15,292` hidden pairs** | Top-K + Rear-FOV + Cave |
-| **Entity Movement Packets (`move/rot/tp`)** | `92,704` | **`76,346`** | **-17.6% movement packets** |
-| **Total Clientbound Packets** | `311,546` (`19,459 pkt/s`) | **`280,944` (`17,548 pkt/s`)** | **-9.8% total packets** |
-| **Server Outbound Bandwidth** | `666.0 KB/s` | **`556.0 KB/s`** | **-16.5% outbound bandwidth** |
-
-- **Historical archive benchmark:** The original v2.6.0 archive stage compressed 122 files across three worlds to 1.97 MB in 142 ms. The current live backup adds filesystem snapshot creation before archiving.
-
-### 4. Live World Diagnostics & Standalone Rust Kernels
-
-- **Live World Collision Scan (`/rustbridge scan world` — 800 mobs):** `0.276 ms` in Rust
-- **Live O(N) Chunk Heatmap (`/rustbridge chunks world` — 1,033 entities):** `0.487 ms` in Rust
-- **Standalone Rust Engine (`cargo run --release -p spica-rust-native --bin bench`):**
-  - Chunk Density Heatmap (5,000 entities): `0.117 ms/tick`
-  - Item Merge Planner (2,000 items → 1,568 pairs): `0.434 ms/tick`
-  - Adaptive MSPT Governor evaluation: `4.1 ns/eval`
-  - Farm & Villager Governor (5,000 entities × 100 players): `1.761 ms` (`~0.09 ms/tick` amortized at 1s interval)
-  - **Parallel Mob Tracking (100 players × 2,000 mobs = 200,000 pairs):** **`0.775 ms`** (`~0.13 ms/tick` amortized at 6-tick interval; Cave + Rear-FOV + Hostile-Priority Top-K Budget + Delta Bitset)
-  - **Redstone & Hopper Governor (2,000 active chunks):** **`0.077 ms/eval`** (asymmetric EWMA heat + smooth fractional drop)
-  - **Parallel 3D Arena Block Diff (128×64×128 = 1,048,576 blocks):** **`1.114 ms/eval`** (52,429 changed blocks extracted)
-  - 2D Flow-Field Pathfinding (128×128 = 16,384 cells w/ obstacles): `2.350 ms/eval` (O(1) per-mob lookup)
-  - Parallel 4-Octave FBM WorldGen Noise (256×256 = 65,536 blocks): `3.025 ms/eval`
-- **Unit Test Suite:** `62/62` Rust unit tests passing (`spica-rust-native`: 39/39, `spica-launcher`: 19/19, `spica-bot-bench`: 4/4) and **16/16 JNI symbol parity verified**.
+- **Rust Unit Test Suite:** `77/77` passing (`spica-rust-native`: 44/44, `spica-launcher`: 28/28, `spica-bot-bench`: 5/5) — covers FFI aliasing/alignment/read-only guards, spatial hash bounds, mid-read backup cancellation, zero-disclosure Protocol v2 HMAC vectors, and Purpur `save-off` state preservation.
+- **JNI Safety (`-Xcheck:jni`):** Verified on OpenJDK 21 with adversarial RW/WW aliasing, read-only `DirectByteBuffer`, active `EntityBatchArena` lease mutation guards, `abi=2` revision enforcement, and lazy `nativeInitPool` thread-count isolation.
+- **Live World Backup Benchmark:** 122 files across 3 worlds (`world`, `world_nether`, `world_the_end`) archived to `2.08 MB` `.tar.gz` in `430–495 ms` with Purpur `save-off` / `Saved the game` ACK verification and prior `save-off` preservation.
 
 ---
 
