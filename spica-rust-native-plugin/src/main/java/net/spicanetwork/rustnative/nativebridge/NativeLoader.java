@@ -11,9 +11,13 @@ import java.util.logging.Logger;
 /**
  * Loads the compiled Rust shared library (.dll on Windows, .so on Linux, .dylib on macOS).
  *
- * Lookup order:
- * 1. Override file in `plugins/SpicaRustNative/native/<libName>` (great for quick dev swaps)
- * 2. Embedded JAR resource `/native/<os>-<arch>/<libName>` extracted to a temp file
+ * Security & Lookup order (O5/O6):
+ * 1. Embedded JAR resource `/native/<os>-<arch>/<libName>` extracted to a temp file (default, trusted).
+ * 2. Opt-in external override (ONLY when {@code native.allow-external-override: true} in config.yml
+ *    or {@code -Dspica.native.allow-override=true}): checks {@code -Dspica.native.dir} first, then
+ *    {@code plugins/SpicaRustNative/native/<libName>}.
+ * 3. Verifies exact native ABI version token from {@link RustNative#nativeGetInfo()} BEFORE
+ *    marking {@code loaded = true} so a mismatched library never poisons runtime state.
  */
 public final class NativeLoader {
 
@@ -24,6 +28,15 @@ public final class NativeLoader {
     }
 
     public static synchronized void load(Path pluginDataDir, Logger logger) throws IOException {
+        load(pluginDataDir, logger, false, null);
+    }
+
+    public static synchronized void load(
+        Path pluginDataDir,
+        Logger logger,
+        boolean configAllowExternalOverride,
+        String expectedPluginVersion
+    ) throws IOException {
         if (loaded) {
             return;
         }
@@ -33,39 +46,111 @@ public final class NativeLoader {
         String libFileName = mapLibraryFileName(os);
         String platformKey = os + "-" + arch;
 
-        // 1) Check external override in plugins/SpicaRustNative/native/
-        Path externalOverride = pluginDataDir.resolve("native").resolve(libFileName);
-        if (Files.isRegularFile(externalOverride)) {
-            Path absolute = externalOverride.toAbsolutePath();
-            logger.info("[SpicaRustNative] Harici native kutuphane yukleniyor: " + absolute);
-            System.load(absolute.toString());
-            loaded = true;
-            loadedPath = absolute.toString();
-            return;
+        boolean allowOverride = configAllowExternalOverride
+            || Boolean.parseBoolean(System.getProperty("spica.native.allow-override", "false"));
+
+        String resolvedSource = null;
+
+        // 1) Opt-in external override (O6 security boundary: never load arbitrary writable DLL/SO by default)
+        if (allowOverride) {
+            Path overrideFile = resolveExternalOverride(pluginDataDir, libFileName);
+            if (overrideFile != null && Files.isRegularFile(overrideFile)) {
+                Path absolute = overrideFile.toAbsolutePath().normalize();
+                logger.warning("[SpicaRustNative] Opt-in harici native kutuphane yukleniyor: " + absolute);
+                System.load(absolute.toString());
+                resolvedSource = "override:" + absolute;
+            }
+        } else {
+            String propDir = System.getProperty("spica.native.dir");
+            if (propDir != null && !propDir.isBlank()) {
+                Path candidate = Path.of(propDir.trim()).resolve(libFileName);
+                if (Files.isRegularFile(candidate)) {
+                    logger.info(
+                        "[SpicaRustNative] Harici native dizini ('" + propDir.trim()
+                            + "') guvenlik nedeniyle atlandi; etkinlestirmek icin config.yml 'native.allow-external-override: true' veya '-Dspica.native.allow-override=true' kullanin."
+                    );
+                }
+            }
         }
 
-        // 2) Extract bundled library from JAR resources
-        String resourcePath = "/native/" + platformKey + "/" + libFileName;
-        try (InputStream in = NativeLoader.class.getResourceAsStream(resourcePath)) {
-            if (in == null) {
+        // 2) Extract bundled library from JAR resources when no opt-in override was loaded
+        if (resolvedSource == null) {
+            String resourcePath = "/native/" + platformKey + "/" + libFileName;
+            try (InputStream in = NativeLoader.class.getResourceAsStream(resourcePath)) {
+                if (in == null) {
+                    throw new IOException(
+                        "Native Rust kutuphanesi bulunamadi! Aranan kaynak: " + resourcePath
+                            + ". Lutfen build-windows.ps1 (Windows) veya build-linux.sh (Linux) ile derleyin."
+                    );
+                }
+
+                Path tempDir = Files.createTempDirectory("spica-rust-native-");
+                Path extracted = tempDir.resolve(libFileName);
+                Files.copy(in, extracted, StandardCopyOption.REPLACE_EXISTING);
+                extracted.toFile().deleteOnExit();
+                tempDir.toFile().deleteOnExit();
+
+                System.load(extracted.toAbsolutePath().toString());
+                resolvedSource = "embedded:" + resourcePath + " -> " + extracted;
+                logger.info("[SpicaRustNative] Gomulu Rust kutuphanesi yuklendi (" + platformKey + ")");
+            }
+        }
+
+        // 3) Exact SemVer ABI verification BEFORE setting loaded = true (prevents poisoned state on mismatch)
+        if (expectedPluginVersion != null && !expectedPluginVersion.isBlank()) {
+            String nativeInfo = RustNative.nativeGetInfo();
+            String nativeVersion = extractNativeVersion(nativeInfo);
+            String normalizedExpected = normalizeExpectedVersion(expectedPluginVersion);
+            if (nativeVersion == null || !nativeVersion.equals(normalizedExpected)) {
                 throw new IOException(
-                    "Native Rust kutuphanesi bulunamadi! Aranan kaynak: " + resourcePath
-                        + " veya harici yol: " + externalOverride.toAbsolutePath()
-                        + ". Lutfen build-windows.ps1 (Windows) veya build-linux.sh (Linux) ile derleyin."
+                    "Native ABI surum uyusmazligi: beklenen=" + normalizedExpected
+                        + ", bulunan=" + (nativeVersion != null ? nativeVersion : String.valueOf(nativeInfo))
                 );
             }
-
-            Path tempDir = Files.createTempDirectory("spica-rust-native-");
-            Path extracted = tempDir.resolve(libFileName);
-            Files.copy(in, extracted, StandardCopyOption.REPLACE_EXISTING);
-            extracted.toFile().deleteOnExit();
-            tempDir.toFile().deleteOnExit();
-
-            System.load(extracted.toAbsolutePath().toString());
-            loaded = true;
-            loadedPath = "embedded:" + resourcePath + " -> " + extracted;
-            logger.info("[SpicaRustNative] Gomulu Rust kutuphanesi yuklendi (" + platformKey + ")");
         }
+
+        loadedPath = resolvedSource;
+        loaded = true;
+    }
+
+    /**
+     * Extracts exact version token from `"spica-rust-native v2.6.0 | os=... | threads=..."`.
+     */
+    static String extractNativeVersion(String nativeInfo) {
+        if (nativeInfo == null) {
+            return null;
+        }
+        String prefix = "spica-rust-native v";
+        int start = nativeInfo.indexOf(prefix);
+        if (start < 0) {
+            return null;
+        }
+        int verStart = start + prefix.length();
+        int sep = nativeInfo.indexOf(" |", verStart);
+        String token = (sep > verStart) ? nativeInfo.substring(verStart, sep) : nativeInfo.substring(verStart);
+        return token.trim();
+    }
+
+    private static String normalizeExpectedVersion(String pluginVersion) {
+        String trimmed = pluginVersion.trim();
+        if (trimmed.endsWith("-SNAPSHOT")) {
+            return trimmed.substring(0, trimmed.length() - "-SNAPSHOT".length());
+        }
+        return trimmed;
+    }
+
+    private static Path resolveExternalOverride(Path pluginDataDir, String libFileName) {
+        String propDir = System.getProperty("spica.native.dir");
+        if (propDir != null && !propDir.isBlank()) {
+            Path configured = Path.of(propDir.trim()).resolve(libFileName);
+            if (Files.isRegularFile(configured)) {
+                return configured;
+            }
+        }
+        if (pluginDataDir != null) {
+            return pluginDataDir.resolve("native").resolve(libFileName);
+        }
+        return null;
     }
 
     public static boolean isLoaded() {

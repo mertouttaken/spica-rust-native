@@ -34,6 +34,7 @@ public final class EntityLodOptimizer {
     private final MobAiOwnershipManager aiOwnership;
     private final EntityBatchArena mainThreadArena = new EntityBatchArena(4096, 256);
     private final List<Mob> mobScratch = new ArrayList<>(4096);
+    private final Location scratchLoc = new Location(null, 0.0, 0.0, 0.0);
     private final Set<EntityType> excludedTypes = EnumSet.noneOf(EntityType.class);
 
     private boolean enabled = true;
@@ -126,13 +127,13 @@ public final class EntityLodOptimizer {
             mainThreadArena.ensureTargetCapacity(Math.max(1, playerCount));
 
             for (int i = 0; i < mobCount; i++) {
-                Location loc = mobScratch.get(i).getLocation();
-                mainThreadArena.setEntityPosition(i, (float) loc.getX(), (float) loc.getY(), (float) loc.getZ(), 0.5f);
+                mobScratch.get(i).getLocation(scratchLoc);
+                mainThreadArena.setEntityPosition(i, (float) scratchLoc.getX(), (float) scratchLoc.getY(), (float) scratchLoc.getZ(), 0.5f);
             }
 
             for (int j = 0; j < playerCount; j++) {
-                Location loc = players.get(j).getLocation();
-                mainThreadArena.setTargetPosition(j, (float) loc.getX(), (float) loc.getY(), (float) loc.getZ());
+                players.get(j).getLocation(scratchLoc);
+                mainThreadArena.setTargetPosition(j, (float) scratchLoc.getX(), (float) scratchLoc.getY(), (float) scratchLoc.getZ());
             }
 
             // Single zero-copy Rust call evaluates all mobs vs all players in parallel

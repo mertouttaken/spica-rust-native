@@ -215,9 +215,20 @@ pub async fn read_packet<R: AsyncRead + Unpin>(
             if data_len == 0 {
                 body.to_vec()
             } else if data_len > 0 && (data_len as usize) <= MAX_PACKET_SIZE {
-                let mut dec = ZlibDecoder::new(body);
-                let mut out = Vec::with_capacity(data_len as usize);
+                let expected = data_len as usize;
+                let mut dec = ZlibDecoder::new(body).take((expected + 1) as u64);
+                let mut out = Vec::with_capacity(expected.min(64 * 1024));
                 dec.read_to_end(&mut out)?;
+                if out.len() != expected {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Decompressed packet length mismatch: header={}, actual={}",
+                            expected,
+                            out.len()
+                        ),
+                    ));
+                }
                 out
             } else {
                 return Err(io::Error::new(
@@ -289,6 +300,28 @@ mod tests {
             .expect("decode large");
         assert_eq!(pkt_large.id, 0x2C);
         assert_eq!(pkt_large.payload, large);
+    }
+
+    #[tokio::test]
+    async fn test_compressed_packet_rejects_decompressed_size_mismatch() {
+        // Compress 64 bytes, but lie in the header claiming data_len = 32 (zip-bomb / corrupt guard)
+        let inner = vec![0x41u8; 64];
+        let mut compressed = Vec::new();
+        {
+            let mut enc = ZlibEncoder::new(&mut compressed, Compression::fast());
+            enc.write_all(&inner).unwrap();
+            enc.finish().unwrap();
+        }
+        let mut body = Vec::new();
+        write_varint(&mut body, 32); // wrong declared uncompressed size!
+        body.extend_from_slice(&compressed);
+        let mut frame = Vec::new();
+        write_varint(&mut frame, body.len() as i32);
+        frame.extend_from_slice(&body);
+
+        let mut cur = io::Cursor::new(frame);
+        let res = read_packet(&mut cur, Some(16)).await;
+        assert!(res.is_err(), "Mismatched decompressed length MUST be rejected");
     }
 
     #[test]

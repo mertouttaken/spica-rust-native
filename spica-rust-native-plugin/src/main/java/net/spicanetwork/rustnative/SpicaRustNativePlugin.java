@@ -45,8 +45,14 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
         saveDefaultConfig();
 
         try {
-            NativeLoader.load(getDataFolder().toPath(), getLogger());
-            int requestedThreads = getConfig().getInt("native.worker-threads", 0);
+            boolean allowExternalOverride = getConfig().getBoolean("native.allow-external-override", false);
+            NativeLoader.load(
+                getDataFolder().toPath(),
+                getLogger(),
+                allowExternalOverride,
+                getPluginMeta().getVersion()
+            );
+            int requestedThreads = resolveRequestedWorkerThreads();
             int activeThreads = RustNative.nativeInitPool(requestedThreads);
             getLogger().info("[SpicaRustNative] Rust motoru hazir: " + RustNative.nativeGetInfo()
                 + " (aktif worker=" + activeThreads + ")");
@@ -259,6 +265,29 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
         return client;
     }
 
+    /**
+     * O5: Wires launcher-provided `-Dspica.native.threads` when config.yml uses auto (`0`),
+     * while letting explicit config.yml overrides (> 0) take precedence.
+     */
+    private int resolveRequestedWorkerThreads() {
+        int cfgThreads = getConfig().getInt("native.worker-threads", 0);
+        if (cfgThreads > 0) {
+            return cfgThreads;
+        }
+        String propThreads = System.getProperty("spica.native.threads");
+        if (propThreads != null && !propThreads.isBlank()) {
+            try {
+                int parsed = Integer.parseInt(propThreads.trim());
+                if (parsed > 0) {
+                    return parsed;
+                }
+            } catch (NumberFormatException ignored) {
+                // Fall back to Rust auto-sizing
+            }
+        }
+        return 0;
+    }
+
     private void scheduleOptimizer() {
         if (optimizerTask != null) {
             optimizerTask.cancel();
@@ -268,7 +297,8 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
             return;
         }
         long interval = Math.max(1L, getConfig().getLong("optimizer.interval-ticks", 10L));
-        this.optimizerTask = Bukkit.getScheduler().runTaskTimer(this, () -> optimizer.tick(), interval, interval);
+        // O1: Stagger initial tick delays (1, 3, 5, 7, 9 mod 10 for odd-phase tasks; 2 mod 2 for tracking) -> 0 collisions
+        this.optimizerTask = Bukkit.getScheduler().runTaskTimer(this, () -> optimizer.tick(), 1L, interval);
     }
 
     private void scheduleFarmGovernor() {
@@ -288,7 +318,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
                     : BrainDirective.STATE_GREEN;
                 farmGovernor.tick(stateCode);
             },
-            interval,
+            5L,
             interval
         );
     }
@@ -310,7 +340,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
                     : BrainDirective.STATE_GREEN;
                 surgeGuard.tick(stateCode);
             },
-            interval,
+            3L,
             interval
         );
     }
@@ -332,7 +362,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
                     : BrainDirective.STATE_GREEN;
                 mobTrackingOptimizer.tick(stateCode);
             },
-            interval,
+            2L,
             interval
         );
     }
@@ -353,7 +383,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
                     : BrainDirective.STATE_GREEN;
                 redstoneGovernor.tick(stateCode);
             },
-            20L,
+            9L,
             20L
         );
     }
@@ -367,7 +397,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
             return;
         }
         long interval = Math.max(5L, getConfig().getLong("brain.tick-interval", 20L));
-        this.brainTask = Bukkit.getScheduler().runTaskTimer(this, () -> brainActuator.tick(), interval, interval);
+        this.brainTask = Bukkit.getScheduler().runTaskTimer(this, () -> brainActuator.tick(), 7L, interval);
     }
 
     public SpicaRustAPI getApi() {

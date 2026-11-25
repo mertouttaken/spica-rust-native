@@ -1,8 +1,12 @@
 //! Parallel Bulk Block / Arena Reset Diff Engine (YZX flattened layout).
 //!
-//! Scans millions of block state IDs across CPU cores via Rayon to produce ONLY
-//! the changed `(rel_x, rel_y, rel_z, new_block_id)` coordinates for Skyblock
-//! island pasting, minigame arena resets, or custom schematic builders.
+//! Scans millions of block state IDs across CPU cores via Rayon using a deterministic
+//! 2-pass tiled prefix-sum algorithm (O4):
+//! - Pass 1 counts differing blocks per 8,192-block tile in parallel (~16 KiB max metadata).
+//! - Exclusive prefix sum assigns each active tile its exact disjoint output subslice capped at `max_diffs`.
+//! - Pass 2 writes `(rel_x, rel_y, rel_z, new_block_id)` directly into caller output slices in parallel.
+//!
+//! Guarantees ZERO massive intermediate `Vec<Vec<_>>` heap spikes (prevents OOM even on 16.7M blocks).
 
 use rayon::prelude::*;
 
@@ -17,7 +21,7 @@ const PARALLEL_CHUNK_SIZE: usize = 8_192;
 /// - If output slices have length `0` (count-only mode), returns total number of
 ///   differing blocks without writing coordinates.
 /// - Otherwise writes up to `min(out_rel_x, out_rel_y, out_rel_z, out_new_block_id)`
-///   changed block entries and returns the number of entries written.
+///   changed block entries in deterministic YZX index order and returns the number written.
 /// - Returns `-1` on invalid dimensions or undersized input slices.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_block_diff(
@@ -100,43 +104,78 @@ pub fn compute_block_diff(
         return written as i32;
     }
 
-    // Parallel chunk diff extraction -> deterministic ordered merge into output slices
-    let per_chunk_diffs: Vec<Vec<(usize, i32)>> = cur
+    // O4: Deterministic 2-pass tiled parallel extraction (O(num_tiles) metadata, zero OOM risk)
+    // Pass 1: Parallel per-tile diff count
+    let tile_counts: Vec<usize> = cur
         .par_chunks(PARALLEL_CHUNK_SIZE)
         .zip(tgt.par_chunks(PARALLEL_CHUNK_SIZE))
-        .enumerate()
-        .map(|(chunk_idx, (c_chunk, t_chunk))| {
-            let base = chunk_idx * PARALLEL_CHUNK_SIZE;
-            let mut local = Vec::new();
-            for offset in 0..c_chunk.len() {
-                let new_id = t_chunk[offset];
-                if c_chunk[offset] != new_id {
-                    local.push((base + offset, new_id));
-                }
-            }
-            local
+        .map(|(c_chunk, t_chunk)| {
+            c_chunk
+                .iter()
+                .zip(t_chunk.iter())
+                .filter(|(&a, &b)| a != b)
+                .count()
         })
         .collect();
 
-    let mut written = 0usize;
-    'outer: for chunk in per_chunk_diffs {
-        for (idx, new_id) in chunk {
-            let x = idx % width;
-            let rem = idx / width;
-            let z = rem % depth;
-            let y = rem / depth;
-            out_rel_x[written] = x as i32;
-            out_rel_y[written] = y as i32;
-            out_rel_z[written] = z as i32;
-            out_new_block_id[written] = new_id;
-            written += 1;
-            if written >= max_diffs {
-                break 'outer;
-            }
+    // Prefix sum -> compute exact capped write quota per tile and split disjoint output subslices
+    let mut rem_x = &mut out_rel_x[..max_diffs];
+    let mut rem_y = &mut out_rel_y[..max_diffs];
+    let mut rem_z = &mut out_rel_z[..max_diffs];
+    let mut rem_id = &mut out_new_block_id[..max_diffs];
+
+    let mut total_written = 0usize;
+    let mut tasks: Vec<(usize, &mut [i32], &mut [i32], &mut [i32], &mut [i32])> = Vec::new();
+
+    for (tile_idx, &count) in tile_counts.iter().enumerate() {
+        if count == 0 || total_written >= max_diffs {
+            continue;
         }
+        let quota = count.min(max_diffs - total_written);
+        let (sx, rest_x) = rem_x.split_at_mut(quota);
+        let (sy, rest_y) = rem_y.split_at_mut(quota);
+        let (sz, rest_z) = rem_z.split_at_mut(quota);
+        let (sid, rest_id) = rem_id.split_at_mut(quota);
+        rem_x = rest_x;
+        rem_y = rest_y;
+        rem_z = rest_z;
+        rem_id = rest_id;
+        total_written += quota;
+        tasks.push((tile_idx, sx, sy, sz, sid));
     }
 
-    written as i32
+    if total_written == 0 {
+        return 0;
+    }
+
+    // Pass 2: Parallel direct write into disjoint tile subslices (safe Rust, deterministic YZX order)
+    tasks
+        .into_par_iter()
+        .for_each(|(tile_idx, sx, sy, sz, sid)| {
+            let base = tile_idx * PARALLEL_CHUNK_SIZE;
+            let end = (base + PARALLEL_CHUNK_SIZE).min(total);
+            let limit = sx.len();
+            let mut local_written = 0usize;
+            for idx in base..end {
+                let new_id = tgt[idx];
+                if cur[idx] != new_id {
+                    let x = idx % width;
+                    let rem = idx / width;
+                    let z = rem % depth;
+                    let y = rem / depth;
+                    sx[local_written] = x as i32;
+                    sy[local_written] = y as i32;
+                    sz[local_written] = z as i32;
+                    sid[local_written] = new_id;
+                    local_written += 1;
+                    if local_written >= limit {
+                        break;
+                    }
+                }
+            }
+        });
+
+    total_written as i32
 }
 
 #[cfg(test)]
@@ -182,27 +221,44 @@ mod tests {
 
     #[test]
     fn test_count_only_mode_and_parallel_cap() {
-        let (w, h, d) = (32, 32, 32); // 32,768 blocks -> triggers Rayon parallel path
+        let (w, h, d) = (32, 32, 32); // 32,768 blocks -> triggers 2-pass Rayon parallel path (4 tiles)
         let cur = vec![1i32; w * h * d];
         let mut tgt = cur.clone();
         for i in (0..tgt.len()).step_by(32) {
-            tgt[i] = 7;
+            tgt[i] = 7 + (i % 13) as i32;
         }
         let expected_total = tgt.len() / 32; // 1024
 
         // Count-only mode (empty outputs)
-        let total_changed = compute_block_diff(w, h, d, &cur, &tgt, &mut [], &mut [], &mut [], &mut []);
+        let total_changed =
+            compute_block_diff(w, h, d, &cur, &tgt, &mut [], &mut [], &mut [], &mut []);
         assert_eq!(total_changed, expected_total as i32);
 
-        // Capped output mode (max_diffs = 50)
-        let mut rx = vec![0i32; 50];
-        let mut ry = vec![0i32; 50];
-        let mut rz = vec![0i32; 50];
-        let mut nid = vec![0i32; 50];
+        // Capped output across tile boundaries (256 diffs per tile -> 300 spans tile 0 full + 44 from tile 1)
+        let cap = 300usize;
+        let mut rx = vec![0i32; cap];
+        let mut ry = vec![0i32; cap];
+        let mut rz = vec![0i32; cap];
+        let mut nid = vec![0i32; cap];
         let written = compute_block_diff(w, h, d, &cur, &tgt, &mut rx, &mut ry, &mut rz, &mut nid);
-        assert_eq!(written, 50);
-        assert_eq!((rx[0], ry[0], rz[0], nid[0]), (0, 0, 0, 7));
-        assert_eq!((rx[1], ry[1], rz[1], nid[1]), (0, 0, 1, 7));
+        assert_eq!(written, cap as i32);
+
+        // Verify exact deterministic YZX parity against linear reference
+        let mut k = 0usize;
+        for idx in 0..tgt.len() {
+            if cur[idx] != tgt[idx] {
+                let x = (idx % w) as i32;
+                let rem = idx / w;
+                let z = (rem % d) as i32;
+                let y = (rem / d) as i32;
+                assert_eq!((rx[k], ry[k], rz[k], nid[k]), (x, y, z, tgt[idx]));
+                k += 1;
+                if k >= cap {
+                    break;
+                }
+            }
+        }
+        assert_eq!(k, cap);
     }
 
     #[test]

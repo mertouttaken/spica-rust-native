@@ -43,10 +43,27 @@ const SAFETY_NEAR_SCORE_BIAS: f32 = -500_000.0;
 const ALWAYS_VISIBLE_SCORE_BIAS: f32 = -1_000_000.0;
 
 struct PlayerTrackResult {
-    deltas: Vec<(usize, i32)>,
+    show_mobs: Vec<usize>,
+    hide_mobs: Vec<usize>,
     hidden_count: i32,
     visible_count: i32,
     culled_by_budget: i32,
+}
+
+/// Per-worker reusable scratch buffers (O2) — allocated once per Rayon worker thread
+/// instead of once per player, eliminating per-player heap churn on large servers.
+struct WorkerScratch {
+    candidates: Vec<(f32, usize, bool)>,
+    desired_visible: Vec<u8>,
+}
+
+impl WorkerScratch {
+    fn new(m: usize, cap_hint: usize) -> Self {
+        Self {
+            candidates: Vec::with_capacity(m.min(cap_hint)),
+            desired_visible: vec![0u8; m],
+        }
+    }
 }
 
 /// Evaluate per-player mob visibility and emit bitset-synchronized HIDE/SHOW deltas.
@@ -180,11 +197,12 @@ pub fn compute_mob_tracking(
     let dot_vis = eff_dot;
     let dot_hid = (eff_dot + 0.12).min(0.6);
 
-    // Parallel per-player evaluation (reads `hidden_bitset` immutably).
+    // Parallel per-player evaluation (reads `hidden_bitset` immutably) using per-worker scratch (O2).
     let per_player_results: Vec<PlayerTrackResult> = {
         let prev_bitset: &[u8] = &*hidden_bitset;
+        let cap_hint = eff_budget.saturating_mul(2).max(16);
 
-        let eval_player = |pi: usize| -> PlayerTrackResult {
+        let eval_player = |scratch: &mut WorkerScratch, pi: usize| -> PlayerTrackResult {
             let px = player_xs[pi];
             let py = player_ys[pi];
             let pz = player_zs[pi];
@@ -206,9 +224,8 @@ pub fn compute_mob_tracking(
             };
 
             let base_bit = pi * m;
-            // (score, mob_idx, immune_from_budget)
-            let mut candidates: Vec<(f32, usize, bool)> =
-                Vec::with_capacity(m.min(eff_budget.saturating_mul(2).max(16)));
+            scratch.candidates.clear();
+            scratch.desired_visible.fill(0);
 
             // Pass A: Spatial + Cave/Vertical + Rear-FOV + Hysteresis filter
             for mi in 0..m {
@@ -217,8 +234,7 @@ pub fn compute_mob_tracking(
                 let flags = mob_flags[mi];
 
                 if !player_finite {
-                    // Invalid player position: avoid erroneous culling.
-                    candidates.push((0.0, mi, true));
+                    scratch.candidates.push((0.0, mi, true));
                     continue;
                 }
 
@@ -229,7 +245,9 @@ pub fn compute_mob_tracking(
 
                 if (flags & TRACK_FLAG_ALWAYS_VISIBLE) != 0 {
                     let finite_d2 = if d2.is_finite() { d2 } else { 0.0 };
-                    candidates.push((ALWAYS_VISIBLE_SCORE_BIAS + finite_d2, mi, true));
+                    scratch
+                        .candidates
+                        .push((ALWAYS_VISIBLE_SCORE_BIAS + finite_d2, mi, true));
                     continue;
                 }
 
@@ -244,30 +262,25 @@ pub fn compute_mob_tracking(
                 };
 
                 // Safety near zone (Y1): exempt from cave/vertical, rear-FOV, AND Top-K budget culling
-                // so nearby threats/mobs are NEVER hidden even inside dense farms or boss arenas.
                 if d2 <= safe_near_sq {
-                    candidates.push((SAFETY_NEAR_SCORE_BIAS + base_score, mi, true));
+                    scratch
+                        .candidates
+                        .push((SAFETY_NEAR_SCORE_BIAS + base_score, mi, true));
                     continue;
                 }
 
-                // Hysteresis limits when previously hidden (prevents boundary flicker).
                 let (r_lim_sq, v_lim, dot_lim) = if prev_hidden {
                     (r_hid_sq, v_hid, dot_hid)
                 } else {
                     (r_vis_sq, v_vis, dot_vis)
                 };
 
-                // Range check
                 if d2 > r_lim_sq {
                     continue;
                 }
-
-                // Cave / vertical delta check
                 if dy.abs() > v_lim {
                     continue;
                 }
-
-                // Rear-FOV check (only beyond eff_rear and when player has a valid look vector)
                 if has_look && d2 > eff_rear_sq {
                     let dot = (dx * lx + dy * ly + dz * lz) / d2.sqrt();
                     if dot < dot_lim {
@@ -275,61 +288,59 @@ pub fn compute_mob_tracking(
                     }
                 }
 
-                candidates.push((base_score, mi, false));
+                scratch.candidates.push((base_score, mi, false));
             }
 
             // Pass B: Per-player Top-K visibility budget cap
-            let mut desired_visible = vec![false; m];
             let mut culled_by_budget = 0i32;
 
-            if candidates.len() <= eff_budget {
-                for &(_, mi, _) in &candidates {
-                    desired_visible[mi] = true;
+            if scratch.candidates.len() <= eff_budget {
+                for &(_, mi, _) in &scratch.candidates {
+                    scratch.desired_visible[mi] = 1;
                 }
             } else {
-                // Partition immune (`TRACK_FLAG_ALWAYS_VISIBLE`) candidates to the front.
                 let mut immune_count = 0usize;
-                for idx in 0..candidates.len() {
-                    if candidates[idx].2 {
-                        candidates.swap(immune_count, idx);
+                for idx in 0..scratch.candidates.len() {
+                    if scratch.candidates[idx].2 {
+                        scratch.candidates.swap(immune_count, idx);
                         immune_count += 1;
                     }
                 }
 
-                for &(_, mi, _) in &candidates[..immune_count] {
-                    desired_visible[mi] = true;
+                for &(_, mi, _) in &scratch.candidates[..immune_count] {
+                    scratch.desired_visible[mi] = 1;
                 }
 
                 let remaining_slots = eff_budget.saturating_sub(immune_count);
-                let non_immune = &mut candidates[immune_count..];
+                let non_immune = &mut scratch.candidates[immune_count..];
 
                 if remaining_slots == 0 {
                     culled_by_budget = non_immune.len() as i32;
                 } else if non_immune.len() > remaining_slots {
-                    // Deterministic tie-breaking by `mob_idx` guarantees 0-delta stability across ticks.
                     non_immune.select_nth_unstable_by(remaining_slots - 1, |a, b| {
                         a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1))
                     });
                     for &(_, mi, _) in &non_immune[..remaining_slots] {
-                        desired_visible[mi] = true;
+                        scratch.desired_visible[mi] = 1;
                     }
                     culled_by_budget = (non_immune.len() - remaining_slots) as i32;
                 } else {
                     for &(_, mi, _) in non_immune.iter() {
-                        desired_visible[mi] = true;
+                        scratch.desired_visible[mi] = 1;
                     }
                 }
             }
 
-            // Pass C: Diff desired state against `prev_hidden`
-            let mut deltas: Vec<(usize, i32)> = Vec::new();
+            // Pass C: Diff desired state against `prev_hidden` into separated SHOW / HIDE queues
+            let mut show_mobs: Vec<usize> = Vec::new();
+            let mut hide_mobs: Vec<usize> = Vec::new();
             let mut hidden_count = 0i32;
             let mut visible_count = 0i32;
 
             for mi in 0..m {
                 let bit = base_bit + mi;
                 let prev_hidden = (prev_bitset[bit >> 3] & (1u8 << (bit & 7))) != 0;
-                let want_hidden = !desired_visible[mi];
+                let want_hidden = scratch.desired_visible[mi] == 0;
 
                 if want_hidden {
                     hidden_count += 1;
@@ -338,17 +349,17 @@ pub fn compute_mob_tracking(
                 }
 
                 if want_hidden != prev_hidden {
-                    let action = if want_hidden {
-                        TRACK_ACTION_HIDE
+                    if want_hidden {
+                        hide_mobs.push(mi);
                     } else {
-                        TRACK_ACTION_SHOW
-                    };
-                    deltas.push((mi, action));
+                        show_mobs.push(mi);
+                    }
                 }
             }
 
             PlayerTrackResult {
-                deltas,
+                show_mobs,
+                hide_mobs,
                 hidden_count,
                 visible_count,
                 culled_by_budget,
@@ -356,14 +367,20 @@ pub fn compute_mob_tracking(
         };
 
         if p >= 2 && total_bits >= PARALLEL_PAIR_THRESHOLD {
-            (0..p).into_par_iter().map(eval_player).collect()
+            (0..p)
+                .into_par_iter()
+                .map_init(|| WorkerScratch::new(m, cap_hint), eval_player)
+                .collect()
         } else {
-            (0..p).map(eval_player).collect()
+            let mut scratch = WorkerScratch::new(m, cap_hint);
+            (0..p).map(|pi| eval_player(&mut scratch, pi)).collect()
         }
     };
 
-    // Sequential merge (Y1): ALWAYS emit TRACK_ACTION_SHOW deltas BEFORE TRACK_ACTION_HIDE deltas
-    // so revealing nearby/approaching mobs is never starved behind hiding distant mobs under backpressure.
+    // Sequential fair round-robin merge (Y1 + O2):
+    // Pass 1 emits TRACK_ACTION_SHOW across players in round-robin order BEFORE any HIDE.
+    // Pass 2 emits TRACK_ACTION_HIDE across players in round-robin order with remaining budget,
+    // preventing player 0 from starving players 1..p-1 under backpressure.
     let max_deltas = out_delta_player_idx
         .len()
         .min(out_delta_mob_idx.len())
@@ -386,45 +403,77 @@ pub fn compute_mob_tracking(
         total_culled_by_budget = total_culled_by_budget.saturating_add(res.culled_by_budget);
     }
 
-    // Pass 1: Emit all SHOW transitions first across all players
-    for (pi, res) in per_player_results.iter().enumerate() {
-        let base_bit = pi * m;
-        for &(mi, action) in &res.deltas {
-            if action != TRACK_ACTION_SHOW {
-                continue;
-            }
-            if deltas_written < max_deltas {
-                let bit = base_bit + mi;
+    // Pass 1: Fair round-robin SHOW emission across all players (exits early when max_deltas is full)
+    let mut show_cursors = vec![0usize; p];
+    if deltas_written < max_deltas {
+        'show_rr: loop {
+            let mut progressed = false;
+            for (pi, res) in per_player_results.iter().enumerate() {
+                let cursor = show_cursors[pi];
+                if cursor >= res.show_mobs.len() {
+                    continue;
+                }
+                progressed = true;
+                let mi = res.show_mobs[cursor];
+                show_cursors[pi] = cursor + 1;
+                let bit = pi * m + mi;
                 hidden_bitset[bit >> 3] &= !(1u8 << (bit & 7));
                 out_delta_player_idx[deltas_written] = pi as i32;
                 out_delta_mob_idx[deltas_written] = mi as i32;
                 out_delta_action[deltas_written] = TRACK_ACTION_SHOW;
                 deltas_written += 1;
-            } else {
-                player_visible_counts[pi] -= 1;
-                player_hidden_counts[pi] += 1;
+                if deltas_written >= max_deltas {
+                    break 'show_rr;
+                }
+            }
+            if !progressed {
+                break;
             }
         }
     }
-
-    // Pass 2: Emit HIDE transitions with remaining delta budget
+    // O(p) reconciliation for any un-emitted SHOW deltas under backpressure
     for (pi, res) in per_player_results.iter().enumerate() {
-        let base_bit = pi * m;
-        for &(mi, action) in &res.deltas {
-            if action != TRACK_ACTION_HIDE {
-                continue;
-            }
-            if deltas_written < max_deltas {
-                let bit = base_bit + mi;
+        let rem_show = (res.show_mobs.len() - show_cursors[pi]) as i32;
+        if rem_show > 0 {
+            player_visible_counts[pi] -= rem_show;
+            player_hidden_counts[pi] += rem_show;
+        }
+    }
+
+    // Pass 2: Fair round-robin HIDE emission across all players with remaining budget (early exit)
+    let mut hide_cursors = vec![0usize; p];
+    if deltas_written < max_deltas {
+        'hide_rr: loop {
+            let mut progressed = false;
+            for (pi, res) in per_player_results.iter().enumerate() {
+                let cursor = hide_cursors[pi];
+                if cursor >= res.hide_mobs.len() {
+                    continue;
+                }
+                progressed = true;
+                let mi = res.hide_mobs[cursor];
+                hide_cursors[pi] = cursor + 1;
+                let bit = pi * m + mi;
                 hidden_bitset[bit >> 3] |= 1u8 << (bit & 7);
                 out_delta_player_idx[deltas_written] = pi as i32;
                 out_delta_mob_idx[deltas_written] = mi as i32;
                 out_delta_action[deltas_written] = TRACK_ACTION_HIDE;
                 deltas_written += 1;
-            } else {
-                player_hidden_counts[pi] -= 1;
-                player_visible_counts[pi] += 1;
+                if deltas_written >= max_deltas {
+                    break 'hide_rr;
+                }
             }
+            if !progressed {
+                break;
+            }
+        }
+    }
+    // O(p) reconciliation for any un-emitted HIDE deltas under backpressure
+    for (pi, res) in per_player_results.iter().enumerate() {
+        let rem_hide = (res.hide_mobs.len() - hide_cursors[pi]) as i32;
+        if rem_hide > 0 {
+            player_hidden_counts[pi] -= rem_hide;
+            player_visible_counts[pi] += rem_hide;
         }
     }
 

@@ -41,7 +41,22 @@ pub fn compute_entity_collisions(
         return 0;
     }
 
-    let grid = SpatialHashGrid::build(xs, ys, zs, cell_size);
+    // O3: Guarantee 3x3x3 cell search mathematically covers max possible collision diameter (2 * max_r)
+    // with finite sanitization and slight ULP margin so boundary pairs are never missed.
+    let mut max_radius = 0.0f32;
+    for &r in radii {
+        if r.is_finite() && r > max_radius {
+            max_radius = r;
+        }
+    }
+    let safe_cell = if cell_size.is_finite() && cell_size > 0.05 {
+        cell_size.min(1e15)
+    } else {
+        0.1
+    };
+    let padded_diameter = (max_radius.min(1e14) * 2.001 + 1e-4).min(1e15);
+    let effective_cell_size = safe_cell.max(padded_diameter);
+    let grid = SpatialHashGrid::build(xs, ys, zs, effective_cell_size);
     let max_push_sq = max_push * max_push;
 
     let compute_one = |i: usize| -> (f32, f32, f32, i32) {
@@ -568,6 +583,21 @@ mod tests {
         assert!(px[0] < 0.0, "Entity 0 should be pushed left");
         assert!(px[1] > 0.0, "Entity 1 should be pushed right");
         assert_eq!(px[2], 0.0);
+
+        // O3: Large radii (2.5 + 2.5 = 5.0) must still collide even when caller passes small cell_size = 1.0
+        let lxs = [0.0f32, 4.2];
+        let lys = [64.0f32, 64.0];
+        let lzs = [0.0f32, 0.0];
+        let lrad = [2.5f32, 2.5];
+        let mut lpx = [0.0f32; 2];
+        let mut lpy = [0.0f32; 2];
+        let mut lpz = [0.0f32; 2];
+        let mut lcnt = [0i32; 2];
+        let ltotal = compute_entity_collisions(
+            &lxs, &lys, &lzs, &lrad, 1.0, 1.0, 2.0, &mut lpx, &mut lpy, &mut lpz, &mut lcnt,
+        );
+        assert_eq!(ltotal, 2);
+        assert_eq!(lcnt, [1, 1]);
     }
 
     #[test]

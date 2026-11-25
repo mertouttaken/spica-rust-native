@@ -1,7 +1,10 @@
 # SpicaRustNative 2.6.0 (Purpur 1.21.4 Core + Rust Brain + Farm Governor + Surge Guard + Mob Tracking + Redstone/Hopper Governor + Arena Block Diff) Yapilandirmasi
 native:
-  # 0 = Otomatik (max(2, cekirdek/2), en fazla 8). Main thread + Netty + GC icin bosluk birakir.
+  # 0 = Otomatik (-Dspica.native.threads varsa onu kullanir; yoksa max(2, cekirdek/2), en fazla 8).
   worker-threads: 0
+  # Guvenlik (O6): Varsayilan false iken yalnizca JAR icine gomulu dogrulanmis native kutuphane yuklenir.
+  # Gelistirme amacli harici .dll/.so yuklemek icin true yapin veya -Dspica.native.allow-override=true verin.
+  allow-external-override: false
 
 brain:
   # Rust Brain (spica-launcher IPC veya in-process Rust Governor) kontrol dongusunu aktif eder.

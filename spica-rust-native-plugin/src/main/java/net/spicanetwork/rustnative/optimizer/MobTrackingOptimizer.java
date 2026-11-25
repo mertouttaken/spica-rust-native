@@ -28,7 +28,6 @@ import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.event.world.EntitiesUnloadEvent;
 import org.bukkit.plugin.Plugin;
-import org.bukkit.util.Vector;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -385,7 +384,7 @@ public final class MobTrackingOptimizer implements Listener {
                 }
             }
 
-            // Snapshot players (position + unit look vector)
+            // Snapshot players (position + unit look vector computed directly from yaw/pitch, zero Vector alloc — O1)
             for (int p = 0; p < playerCount; p++) {
                 Player player = playerScratch.get(p);
                 player.getLocation(scratchLoc);
@@ -393,10 +392,12 @@ public final class MobTrackingOptimizer implements Listener {
                 playerY.put(p, (float) scratchLoc.getY());
                 playerZ.put(p, (float) scratchLoc.getZ());
 
-                Vector look = scratchLoc.getDirection();
-                float lx = (float) look.getX();
-                float ly = (float) look.getY();
-                float lz = (float) look.getZ();
+                double rotX = Math.toRadians(scratchLoc.getYaw());
+                double rotY = Math.toRadians(scratchLoc.getPitch());
+                double cosY = Math.cos(rotY);
+                float lx = (float) (-cosY * Math.sin(rotX));
+                float ly = (float) (-Math.sin(rotY));
+                float lz = (float) (cosY * Math.cos(rotX));
                 if (!Float.isFinite(lx) || !Float.isFinite(ly) || !Float.isFinite(lz)) {
                     lx = 0.0f;
                     ly = 0.0f;

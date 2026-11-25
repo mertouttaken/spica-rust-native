@@ -1,13 +1,13 @@
 //! Async Minecraft 1.21.4 (Protocol 769) offline-mode bot state machine
-//! (Handshaking -> Login -> Configuration -> Play) and thread-safe telemetry counters.
+//! (Handshaking -> Login -> Configuration -> Play) and steady-state telemetry counters (O7).
 
 use crate::protocol::{
     offline_uuid, read_i32_be, read_i64_be, read_packet, read_varint_slice, send_packet, write_f32,
     write_i32, write_i64, write_mc_string, write_u16, write_varint, PROTOCOL_VERSION_1_21_4,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
@@ -39,7 +39,7 @@ const CB_CONFIG_KEEP_ALIVE: i32 = 0x04;
 const CB_CONFIG_PING: i32 = 0x05;
 const CB_CONFIG_SELECT_KNOWN_PACKS: i32 = 0x0E;
 
-// Play (Game)
+// Play (Game) — Minecraft 1.21.4 (Protocol 769)
 const SB_PLAY_ACCEPT_TELEPORT: i32 = 0x00;
 const SB_PLAY_CHUNK_BATCH_RECEIVED: i32 = 0x09;
 const SB_PLAY_KEEP_ALIVE: i32 = 0x1A;
@@ -48,6 +48,8 @@ const SB_PLAY_PONG: i32 = 0x2B;
 
 const CB_PLAY_ADD_ENTITY: i32 = 0x01;
 const CB_PLAY_CHUNK_BATCH_FINISHED: i32 = 0x0C;
+/// O7: MC 1.21.4 ClientboundEntityPositionSyncPacket (`0x20`)
+const CB_PLAY_ENTITY_POSITION_SYNC: i32 = 0x20;
 const CB_PLAY_KEEP_ALIVE: i32 = 0x27;
 const CB_PLAY_MOVE_ENTITY_POS: i32 = 0x2F;
 const CB_PLAY_MOVE_ENTITY_POS_ROT: i32 = 0x30;
@@ -60,28 +62,74 @@ const CB_PLAY_SET_ENTITY_DATA: i32 = 0x5D;
 const CB_PLAY_SET_ENTITY_MOTION: i32 = 0x5F;
 const CB_PLAY_TELEPORT_ENTITY: i32 = 0x77;
 
-#[derive(Default)]
 pub struct BenchMetrics {
+    pub measuring: AtomicBool,
     pub attempted: AtomicU64,
     pub connected_play: AtomicU64,
-    pub active_play: AtomicU64,
+    pub ready_play: AtomicU64,
+    pub active_ready_play: AtomicU64,
     pub failed_connect: AtomicU64,
-    pub disconnected_early: AtomicU64,
+    pub disconnected_before_ready: AtomicU64,
+    pub disconnected_after_ready: AtomicU64,
     pub entity_spawn: AtomicU64,
     pub entity_move: AtomicU64,
+    pub entity_pos_sync: AtomicU64,
     pub entity_meta: AtomicU64,
     pub entity_remove: AtomicU64,
+    pub entities_removed_total: AtomicU64,
     pub keepalives_acked: AtomicU64,
     pub total_packets_in: AtomicU64,
     pub total_bytes_in: AtomicU64,
+    pub join_latencies_ms: Mutex<Vec<u64>>,
+}
+
+impl Default for BenchMetrics {
+    fn default() -> Self {
+        Self {
+            measuring: AtomicBool::new(false),
+            attempted: AtomicU64::new(0),
+            connected_play: AtomicU64::new(0),
+            ready_play: AtomicU64::new(0),
+            active_ready_play: AtomicU64::new(0),
+            failed_connect: AtomicU64::new(0),
+            disconnected_before_ready: AtomicU64::new(0),
+            disconnected_after_ready: AtomicU64::new(0),
+            entity_spawn: AtomicU64::new(0),
+            entity_move: AtomicU64::new(0),
+            entity_pos_sync: AtomicU64::new(0),
+            entity_meta: AtomicU64::new(0),
+            entity_remove: AtomicU64::new(0),
+            entities_removed_total: AtomicU64::new(0),
+            keepalives_acked: AtomicU64::new(0),
+            total_packets_in: AtomicU64::new(0),
+            total_bytes_in: AtomicU64::new(0),
+            join_latencies_ms: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 impl BenchMetrics {
     pub fn total_entity_packets(&self) -> u64 {
         self.entity_spawn.load(Ordering::Relaxed)
             + self.entity_move.load(Ordering::Relaxed)
+            + self.entity_pos_sync.load(Ordering::Relaxed)
             + self.entity_meta.load(Ordering::Relaxed)
             + self.entity_remove.load(Ordering::Relaxed)
+    }
+
+    pub fn p95_join_latency_ms(&self) -> u64 {
+        let mut samples = match self.join_latencies_ms.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        if samples.is_empty() {
+            return 0;
+        }
+        samples.sort_unstable();
+        let idx = ((samples.len() as f64 * 0.95).ceil() as usize)
+            .saturating_sub(1)
+            .min(samples.len() - 1);
+        samples[idx]
     }
 }
 
@@ -92,18 +140,28 @@ pub async fn run_bot(
     metrics: Arc<BenchMetrics>,
     mut stop_rx: watch::Receiver<bool>,
 ) {
+    let join_start = Instant::now();
     metrics.attempted.fetch_add(1, Ordering::Relaxed);
 
     if *stop_rx.borrow() {
         return;
     }
 
-    let addr = format!("{}:{}", host, port);
-    let mut stream = match tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr)).await {
-        Ok(Ok(s)) => s,
-        _ => {
-            metrics.failed_connect.fetch_add(1, Ordering::Relaxed);
+    let mut stream = tokio::select! {
+        _ = stop_rx.changed() => {
+            if *stop_rx.borrow() {
+                return;
+            }
             return;
+        }
+        res = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect((host.as_str(), port))) => {
+            match res {
+                Ok(Ok(s)) => s,
+                _ => {
+                    metrics.failed_connect.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            }
         }
     };
     let _ = stream.set_nodelay(true);
@@ -235,7 +293,6 @@ pub async fn run_bot(
 
         match pkt.id {
             CB_CONFIG_SELECT_KNOWN_PACKS => {
-                // Acknowledge with 0 known packs so server sends all default registries
                 let mut resp = Vec::with_capacity(2);
                 write_varint(&mut resp, 0);
                 let _ = send_packet(
@@ -278,10 +335,9 @@ pub async fn run_bot(
         }
     }
 
-    // 4. Play Phase — Bot is fully in-world!
-    // Split TCP stream so `read_packet` is NEVER cancelled mid-frame by the 250ms look-rotation timer.
+    // 4. Play Phase — Bot entered Play; wait for initial Player Position teleport ACK to mark ready!
     metrics.connected_play.fetch_add(1, Ordering::Relaxed);
-    metrics.active_play.fetch_add(1, Ordering::Relaxed);
+    let mut marked_ready = false;
 
     let (mut reader, writer) = stream.into_split();
     let writer = Arc::new(tokio::sync::Mutex::new(writer));
@@ -290,7 +346,6 @@ pub async fn run_bot(
     let rot_writer = Arc::clone(&writer);
     let mut rot_stop_rx = stop_rx.clone();
     let rot_task = tokio::spawn(async move {
-        // Wait until server sends initial Player Position teleport before rotating look vector
         while !*tp_rx.borrow() {
             tokio::select! {
                 _ = rot_stop_rx.changed() => {
@@ -345,14 +400,21 @@ pub async fn run_bot(
                     Ok(p) => p,
                     Err(_) => {
                         if !*stop_rx.borrow() {
-                            metrics.disconnected_early.fetch_add(1, Ordering::Relaxed);
+                            if marked_ready {
+                                metrics.disconnected_after_ready.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                metrics.disconnected_before_ready.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                         break;
                     }
                 };
 
-                metrics.total_packets_in.fetch_add(1, Ordering::Relaxed);
-                metrics.total_bytes_in.fetch_add(pkt.wire_bytes as u64, Ordering::Relaxed);
+                let record = metrics.measuring.load(Ordering::Relaxed);
+                if record {
+                    metrics.total_packets_in.fetch_add(1, Ordering::Relaxed);
+                    metrics.total_bytes_in.fetch_add(pkt.wire_bytes as u64, Ordering::Relaxed);
+                }
 
                 match pkt.id {
                     CB_PLAY_KEEP_ALIVE => {
@@ -360,8 +422,10 @@ pub async fn run_bot(
                             let mut resp = Vec::with_capacity(8);
                             write_i64(&mut resp, ka_id);
                             let mut w = writer.lock().await;
-                            let _ = send_packet(&mut *w, SB_PLAY_KEEP_ALIVE, &resp, compression).await;
-                            metrics.keepalives_acked.fetch_add(1, Ordering::Relaxed);
+                            // O7: Only increment keepalives_acked when write succeeds
+                            if send_packet(&mut *w, SB_PLAY_KEEP_ALIVE, &resp, compression).await.is_ok() {
+                                metrics.keepalives_acked.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                     CB_PLAY_PING => {
@@ -377,8 +441,20 @@ pub async fn run_bot(
                             let mut resp = Vec::with_capacity(5);
                             write_varint(&mut resp, tp_id);
                             let mut w = writer.lock().await;
-                            let _ = send_packet(&mut *w, SB_PLAY_ACCEPT_TELEPORT, &resp, compression).await;
-                            let _ = tp_tx.send(true);
+                            // O7: Only mark ready & start look rotation if teleport ACK write succeeds
+                            if send_packet(&mut *w, SB_PLAY_ACCEPT_TELEPORT, &resp, compression).await.is_ok() {
+                                if !marked_ready {
+                                    marked_ready = true;
+                                    metrics.ready_play.fetch_add(1, Ordering::Relaxed);
+                                    metrics.active_ready_play.fetch_add(1, Ordering::Relaxed);
+                                    let latency = join_start.elapsed().as_millis() as u64;
+                                    match metrics.join_latencies_ms.lock() {
+                                        Ok(mut g) => g.push(latency),
+                                        Err(p) => p.into_inner().push(latency),
+                                    }
+                                }
+                                let _ = tp_tx.send(true);
+                            }
                         }
                     }
                     CB_PLAY_CHUNK_BATCH_FINISHED => {
@@ -388,7 +464,14 @@ pub async fn run_bot(
                         let _ = send_packet(&mut *w, SB_PLAY_CHUNK_BATCH_RECEIVED, &resp, compression).await;
                     }
                     CB_PLAY_ADD_ENTITY => {
-                        metrics.entity_spawn.fetch_add(1, Ordering::Relaxed);
+                        if record {
+                            metrics.entity_spawn.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    CB_PLAY_ENTITY_POSITION_SYNC => {
+                        if record {
+                            metrics.entity_pos_sync.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     CB_PLAY_MOVE_ENTITY_POS
                     | CB_PLAY_MOVE_ENTITY_POS_ROT
@@ -396,13 +479,24 @@ pub async fn run_bot(
                     | CB_PLAY_ROTATE_HEAD
                     | CB_PLAY_SET_ENTITY_MOTION
                     | CB_PLAY_TELEPORT_ENTITY => {
-                        metrics.entity_move.fetch_add(1, Ordering::Relaxed);
+                        if record {
+                            metrics.entity_move.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     CB_PLAY_SET_ENTITY_DATA => {
-                        metrics.entity_meta.fetch_add(1, Ordering::Relaxed);
+                        if record {
+                            metrics.entity_meta.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     CB_PLAY_REMOVE_ENTITIES => {
-                        metrics.entity_remove.fetch_add(1, Ordering::Relaxed);
+                        if record {
+                            metrics.entity_remove.fetch_add(1, Ordering::Relaxed);
+                            if let Ok((cnt, _)) = read_varint_slice(&pkt.payload) {
+                                if cnt > 0 {
+                                    metrics.entities_removed_total.fetch_add(cnt as u64, Ordering::Relaxed);
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -411,5 +505,7 @@ pub async fn run_bot(
     }
 
     rot_task.abort();
-    metrics.active_play.fetch_sub(1, Ordering::Relaxed);
+    if marked_ready {
+        metrics.active_ready_play.fetch_sub(1, Ordering::Relaxed);
+    }
 }
