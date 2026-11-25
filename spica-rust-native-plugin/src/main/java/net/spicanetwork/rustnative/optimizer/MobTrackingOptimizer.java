@@ -372,17 +372,17 @@ public final class MobTrackingOptimizer implements Listener {
             ensureMobCapacity(mobCount);
             ensurePlayerCapacity(playerCount);
             ensureBitsetCapacity(neededBitsetBytes);
-            ensureDeltaCapacity(maxDeltasPerTick);
 
-            // Check if any active player in this world currently has hidden mobs before indexing UUIDs
-            boolean anyHiddenInWorld = false;
+            // R8: Count total currently tracked hidden pairs in this world so we can size the output
+            // delta buffer large enough for ALL SHOW transitions without truncating safety-near mobs.
+            int hiddenInWorldCount = 0;
             for (int p = 0; p < playerCount; p++) {
                 Set<UUID> hidden = hiddenMobsByPlayer.get(playerScratch.get(p).getUniqueId());
                 if (hidden != null && !hidden.isEmpty()) {
-                    anyHiddenInWorld = true;
-                    break;
+                    hiddenInWorldCount += hidden.size();
                 }
             }
+            boolean anyHiddenInWorld = hiddenInWorldCount > 0;
 
             // Snapshot players (position + unit look vector computed directly from yaw/pitch, zero Vector alloc — O1)
             for (int p = 0; p < playerCount; p++) {
@@ -458,8 +458,13 @@ public final class MobTrackingOptimizer implements Listener {
             statsView.put(3, 0);
 
             int remainingHideBudget = Math.max(0, maxDeltasPerTick - hidesAppliedThisTick);
-            // Y1: Always reserve ample room for SHOW transitions (which Rust emits FIRST before HIDE)
-            int callMaxDeltas = Math.max(remainingHideBudget + Math.min(256, maxDeltasPerTick), 128);
+            // R8/Y1: Cover ALL currently hidden pairs in this world + remaining HIDE budget so
+            // Rust Pass 1 (SHOWs) is never truncated by maxDeltasPerTick during mass mob reveals.
+            int callMaxDeltas = (int) Math.clamp(
+                (long) hiddenInWorldCount + (long) remainingHideBudget,
+                128L,
+                65_536L
+            );
             ensureDeltaCapacity(callMaxDeltas);
 
             long rustStart = System.nanoTime();
@@ -703,7 +708,7 @@ public final class MobTrackingOptimizer implements Listener {
         if (neededDeltas <= deltaCapacity) {
             return;
         }
-        int next = Math.max(64, neededDeltas);
+        int next = (int) Math.min(65_536L, Math.max((long) deltaCapacity * 2L, Math.max(64L, neededDeltas)));
         allocateDeltaBuffers(next);
     }
 

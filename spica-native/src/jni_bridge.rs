@@ -97,6 +97,10 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
     .unwrap_or(-1)
 }
 
+/// Explicit JNI ABI contract revision (R13): bumped whenever FFI safety or output layout changes,
+/// allowing `NativeLoader` to distinguish incompatible binaries even within the same package SemVer.
+const NATIVE_ABI_REV: u32 = 2;
+
 #[no_mangle]
 #[allow(unused_mut)]
 pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_nativeGetInfo<'local>(
@@ -105,8 +109,9 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
 ) -> jstring {
     catch_unwind(AssertUnwindSafe(|| {
         let info = format!(
-            "spica-rust-native v{} | os={}-{} | threads={}",
+            "spica-rust-native v{} | abi={} | os={}-{} | threads={}",
             env!("CARGO_PKG_VERSION"),
+            NATIVE_ABI_REV,
             std::env::consts::OS,
             std::env::consts::ARCH,
             crate::active_threads()

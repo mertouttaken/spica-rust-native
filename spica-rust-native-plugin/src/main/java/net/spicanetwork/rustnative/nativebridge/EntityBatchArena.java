@@ -4,16 +4,22 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
+import java.util.Objects;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
 /**
  * Reusable off-heap Structure-of-Arrays (SoA) memory arena for zero-copy Rust FFI calls.
  *
- * Guarantees:
- * - Zero JVM heap allocations per tick once warmed up
- * - Native CPU endianness (`ByteOrder.nativeOrder()`) so Rust reads raw f32/i32 slices directly
- * - Exclusive call lease (`acquireNativeLease()`) preventing concurrent JNI calls or buffer
- *   resizing while Rust holds raw pointers into this arena
+ * Ownership & Concurrency Contract (R1):
+ * - Zero JVM heap allocations per tick once warmed up.
+ * - Native CPU endianness ({@code ByteOrder.nativeOrder()}) so Rust reads raw f32/i32 slices directly.
+ * - An {@code EntityBatchArena} MUST either be confined to a single thread (e.g. the Bukkit Main Thread)
+ *   OR accessed exclusively inside {@link #withExclusiveAccess(Consumer)} when shared across threads.
+ * - All setter helpers and resize operations reject mutation while a native FFI call holds
+ *   {@link #acquireNativeLease()}. Direct public buffer views are retained for zero-allocation hot-path
+ *   compatibility and MUST NOT be mutated concurrently while another thread executes a native call on
+ *   the same arena.
  */
 public final class EntityBatchArena {
 
@@ -69,6 +75,24 @@ public final class EntityBatchArena {
     }
 
     /**
+     * Executes {@code action} while holding exclusive lock ownership over this arena (R1).
+     * Use this when sharing an arena across threads to serialize fill -> native call -> read-output
+     * sequences so no peer thread can mutate direct buffers while Rust holds raw pointers.
+     */
+    public void withExclusiveAccess(Consumer<EntityBatchArena> action) {
+        Objects.requireNonNull(action, "action");
+        nativeLeaseLock.lock();
+        try {
+            if (inNativeCall) {
+                throw new IllegalStateException("Cannot acquire exclusive arena access during an active native FFI call.");
+            }
+            action.accept(this);
+        } finally {
+            nativeLeaseLock.unlock();
+        }
+    }
+
+    /**
      * Acquires an exclusive ownership lease on this arena for the duration of a single native
      * Rust FFI invocation. Prevents concurrent JNI calls or buffer reallocation while Rust
      * reads/writes off-heap memory.
@@ -83,7 +107,20 @@ public final class EntityBatchArena {
         return new NativeLease(this);
     }
 
+    private void assertNotInNativeCall() {
+        if (inNativeCall) {
+            throw new IllegalStateException(
+                "EntityBatchArena buffers cannot be mutated while a native Rust FFI call is active."
+            );
+        }
+    }
+
     private void releaseNativeLease() {
+        if (!nativeLeaseLock.isHeldByCurrentThread()) {
+            throw new IllegalMonitorStateException(
+                "EntityBatchArena.NativeLease must be closed on the thread that acquired it."
+            );
+        }
         inNativeCall = false;
         nativeLeaseLock.unlock();
     }
@@ -166,6 +203,7 @@ public final class EntityBatchArena {
     }
 
     public void setEntityPosition(int index, float px, float py, float pz, float r) {
+        assertNotInNativeCall();
         x.put(index, px);
         y.put(index, py);
         z.put(index, pz);
@@ -173,18 +211,21 @@ public final class EntityBatchArena {
     }
 
     public void setEntityVelocity(int index, float velX, float velY, float velZ) {
+        assertNotInNativeCall();
         vx.put(index, velX);
         vy.put(index, velY);
         vz.put(index, velZ);
     }
 
     public void setTargetPosition(int index, float px, float py, float pz) {
+        assertNotInNativeCall();
         targetX.put(index, px);
         targetY.put(index, py);
         targetZ.put(index, pz);
     }
 
     public void setEntityPositionAndFlags(int index, float px, float py, float pz, int entityFlags) {
+        assertNotInNativeCall();
         x.put(index, px);
         y.put(index, py);
         z.put(index, pz);
@@ -192,6 +233,7 @@ public final class EntityBatchArena {
     }
 
     public void setItem(int index, float px, float py, float pz, int itemTypeId, int stackAmount) {
+        assertNotInNativeCall();
         x.put(index, px);
         y.put(index, py);
         z.put(index, pz);

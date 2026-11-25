@@ -163,20 +163,41 @@ impl SpatialHashGrid {
         let min_cz = ((z - r) * self.inv_cell_size).floor();
         let max_cz = ((z + r) * self.inv_cell_size).floor();
 
-        // O3 guard: if the queried bounding box spans more cells than total entities or table buckets
-        // (e.g. huge radius r), scan sorted_indices directly in O(N) instead of iterating billions of cells.
-        let span_x = ((max_cx as i64) - (min_cx as i64)).saturating_add(1).max(0) as u128;
-        let span_y = ((max_cy as i64) - (min_cy as i64)).saturating_add(1).max(0) as u128;
-        let span_z = ((max_cz as i64) - (min_cz as i64)).saturating_add(1).max(0) as u128;
+        // R16: Validate finiteness BEFORE casting to integers, then compute spans in i128 without overflow.
+        let coords_valid = min_cx.is_finite()
+            && max_cx.is_finite()
+            && min_cy.is_finite()
+            && max_cy.is_finite()
+            && min_cz.is_finite()
+            && max_cz.is_finite()
+            && min_cx >= (i32::MIN as f32)
+            && max_cx <= (i32::MAX as f32)
+            && min_cy >= (i32::MIN as f32)
+            && max_cy <= (i32::MAX as f32)
+            && min_cz >= (i32::MIN as f32)
+            && max_cz <= (i32::MAX as f32);
+
+        if !coords_valid {
+            for &idx in &self.sorted_indices {
+                f(idx as usize);
+            }
+            return;
+        }
+
+        let span_x = (max_cx as i128)
+            .saturating_sub(min_cx as i128)
+            .saturating_add(1)
+            .max(0) as u128;
+        let span_y = (max_cy as i128)
+            .saturating_sub(min_cy as i128)
+            .saturating_add(1)
+            .max(0) as u128;
+        let span_z = (max_cz as i128)
+            .saturating_sub(min_cz as i128)
+            .saturating_add(1)
+            .max(0) as u128;
         let total_cells = span_x.saturating_mul(span_y).saturating_mul(span_z);
-        if total_cells > (self.sorted_indices.len() as u128).min((self.table_mask + 1) as u128)
-            || !min_cx.is_finite()
-            || !max_cx.is_finite()
-            || !min_cy.is_finite()
-            || !max_cy.is_finite()
-            || !min_cz.is_finite()
-            || !max_cz.is_finite()
-        {
+        if total_cells > (self.sorted_indices.len() as u128).min((self.table_mask + 1) as u128) {
             for &idx in &self.sorted_indices {
                 f(idx as usize);
             }

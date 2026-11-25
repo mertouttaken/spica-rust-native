@@ -49,6 +49,7 @@ optimizer:
     - VILLAGER
     - WANDERING_TRADER
     - IRON_GOLEM
+    - BEE
     - ENDER_DRAGON
     - WITHER
     - WARDEN
@@ -88,6 +89,7 @@ farm-governor:
   # Farm Governor tarafindan asla baskilanmayacak mob turleri.
   # Not: villager-optimization.enabled=true iken VILLAGER bilerek burada degildir (FLAG_VILLAGER ile guvenli yonetilir).
   excluded-types:
+    - BEE
     - ENDER_DRAGON
     - WITHER
     - WARDEN

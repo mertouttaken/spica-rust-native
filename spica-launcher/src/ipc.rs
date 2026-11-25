@@ -13,15 +13,16 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_IDLE_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const IPC_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_CONCURRENT_IPC_CONNS: usize = 8;
+const IPC_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Deserialize)]
 struct HelloMessage {
     #[serde(rename = "type")]
     msg_type: String,
-    #[serde(default)]
-    token: String,
-    #[serde(default)]
-    nonce: String,
+    #[serde(rename = "clientNonce", default)]
+    client_nonce: String,
+    #[serde(rename = "clientProof", default)]
+    client_proof: String,
     #[serde(default)]
     server: String,
     #[serde(rename = "pluginVersion", default)]
@@ -166,6 +167,39 @@ fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
         let _ = write!(&mut hex, "{:02x}", b);
     }
     hex
+}
+
+fn generate_server_nonce_hex() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|e| format!("CSPRNG server nonce uretilemedi: {}", e))?;
+    let mut hex = String::with_capacity(32);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut hex, "{:02x}", b);
+    }
+    Ok(hex)
+}
+
+fn is_valid_nonce(nonce: &str) -> bool {
+    nonce.len() >= 16
+        && nonce.len() <= 128
+        && nonce.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// R5: Zero-disclosure client authentication proof: never transmits the shared secret over TCP.
+fn compute_client_proof(token: &str, server_nonce: &str, client_nonce: &str) -> String {
+    let msg = format!("spica-ipc-v2-client:{}:{}", server_nonce, client_nonce);
+    hmac_sha256_hex(token.as_bytes(), msg.as_bytes())
+}
+
+/// R5: Mutual server authentication proof bound to both nonces and the allocated `conn_id`.
+fn compute_server_proof(token: &str, client_nonce: &str, server_nonce: &str, conn_id: u64) -> String {
+    let msg = format!(
+        "spica-ipc-v2-server:{}:{}:{}",
+        client_nonce, server_nonce, conn_id
+    );
+    hmac_sha256_hex(token.as_bytes(), msg.as_bytes())
 }
 
 fn normalize_bind_host(host: &str) -> &str {
@@ -338,7 +372,24 @@ async fn handle_client(
     let mut reader = BufReader::new(read_half);
     let mut buf = Vec::with_capacity(1024);
 
-    // Step 1: Mandatory hello handshake line with constant-time token + nonce validation
+    // Step 1a (R5): Send server challenge nonce first so the shared token is NEVER transmitted in plaintext
+    let server_nonce = match generate_server_nonce_hex() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[SpicaBrain IPC] {} {}", peer, e);
+            return;
+        }
+    };
+    let challenge_line = format!(
+        "{{\"type\":\"hello_challenge\",\"protocol\":{},\"nonce\":\"{}\"}}\n",
+        IPC_PROTOCOL_VERSION, server_nonce
+    );
+    if let Err(e) = write_line_timeout(&mut write_half, challenge_line.as_bytes()).await {
+        eprintln!("[SpicaBrain IPC] {} hello_challenge yazma hatasi: {}", peer, e);
+        return;
+    }
+
+    // Step 1b: Mandatory hello handshake line with zero-disclosure HMAC-SHA256 clientProof
     let hello_read = tokio::time::timeout(
         HELLO_TIMEOUT,
         read_bounded_line(&mut reader, &mut buf, MAX_IPC_LINE_BYTES),
@@ -371,15 +422,14 @@ async fn handle_client(
         }
     };
 
-    let valid_nonce = !hello.nonce.is_empty()
-        && hello.nonce.len() <= 128
-        && hello.nonce.bytes().all(|b| b.is_ascii_alphanumeric());
+    let expected_client_proof =
+        compute_client_proof(&expected_token, &server_nonce, &hello.client_nonce);
     if hello.msg_type != "hello"
-        || !constant_time_eq(&hello.token, &expected_token)
-        || !valid_nonce
+        || !is_valid_nonce(&hello.client_nonce)
+        || !constant_time_eq(&hello.client_proof, &expected_client_proof)
     {
         eprintln!(
-            "[SpicaBrain IPC] {} gecersiz token/nonce veya mesaj tipi (baglanti reddedildi)",
+            "[SpicaBrain IPC] {} gecersiz HMAC istemci kaniti/nonce veya mesaj tipi (baglanti reddedildi)",
             peer
         );
         return;
@@ -403,12 +453,11 @@ async fn handle_client(
             .register_connection(server_label.clone(), plugin_ver.clone()),
     };
 
-    // Y7: Mutual authentication proof: HMAC-SHA256(token, "spica-ipc-v1:<nonce>:<connId>")
-    let challenge = format!("spica-ipc-v1:{}:{}", hello.nonce, conn_id);
-    let proof = hmac_sha256_hex(expected_token.as_bytes(), challenge.as_bytes());
+    // Step 1c (R5): Mutual server proof bound to both nonces and conn_id
+    let proof = compute_server_proof(&expected_token, &hello.client_nonce, &server_nonce, conn_id);
     let ack = format!(
-        "{{\"type\":\"hello_ack\",\"status\":\"ok\",\"connId\":{},\"proof\":\"{}\"}}\n",
-        conn_id, proof
+        "{{\"type\":\"hello_ack\",\"status\":\"ok\",\"protocol\":{},\"connId\":{},\"proof\":\"{}\"}}\n",
+        IPC_PROTOCOL_VERSION, conn_id, proof
     );
     if let Err(e) = write_line_timeout(&mut write_half, ack.as_bytes()).await {
         eprintln!("[SpicaBrain IPC] {} hello_ack yazma hatasi: {}", peer, e);
@@ -570,5 +619,29 @@ mod tests {
             mac,
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
+    }
+
+    #[test]
+    fn test_zero_disclosure_mutual_challenge_response_vectors() {
+        let token = "secret-spica-token-256bit";
+        let server_nonce = "0123456789abcdef0123456789abcdef";
+        let client_nonce = "fedcba9876543210fedcba9876543210";
+
+        assert!(is_valid_nonce(server_nonce));
+        assert!(is_valid_nonce(client_nonce));
+        assert!(!is_valid_nonce("short"));
+        assert!(!is_valid_nonce("bad-nonce-with-dashes!"));
+
+        let c_proof = compute_client_proof(token, server_nonce, client_nonce);
+        let c_proof_wrong_token = compute_client_proof("wrong-token", server_nonce, client_nonce);
+        let c_proof_swapped = compute_client_proof(token, client_nonce, server_nonce);
+        assert_eq!(c_proof.len(), 64);
+        assert!(!constant_time_eq(&c_proof, &c_proof_wrong_token));
+        assert!(!constant_time_eq(&c_proof, &c_proof_swapped));
+
+        let s_proof_1 = compute_server_proof(token, client_nonce, server_nonce, 1);
+        let s_proof_2 = compute_server_proof(token, client_nonce, server_nonce, 2);
+        assert_eq!(s_proof_1.len(), 64);
+        assert!(!constant_time_eq(&s_proof_1, &s_proof_2));
     }
 }

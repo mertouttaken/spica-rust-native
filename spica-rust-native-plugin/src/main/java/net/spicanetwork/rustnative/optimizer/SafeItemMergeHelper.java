@@ -175,7 +175,9 @@ public final class SafeItemMergeHelper {
                 continue;
             }
             if (!Objects.equals(targetItem.getOwner(), sourceItem.getOwner())
-                || !Objects.equals(targetItem.getThrower(), sourceItem.getThrower())) {
+                || !Objects.equals(targetItem.getThrower(), sourceItem.getThrower())
+                || targetItem.canPlayerPickup() != sourceItem.canPlayerPickup()
+                || targetItem.canMobPickup() != sourceItem.canMobPickup()) {
                 continue;
             }
 
@@ -204,7 +206,7 @@ public final class SafeItemMergeHelper {
                 continue;
             }
 
-            // Full post-event re-validation in case a listener mutated ownership, world, metadata, or counts
+            // Full post-event re-validation in case a listener mutated ownership, world, location, flags, or counts (R10)
             if (!isEligibleCandidate(targetItem) || !isEligibleCandidate(sourceItem)) {
                 continue;
             }
@@ -212,7 +214,14 @@ public final class SafeItemMergeHelper {
                 continue;
             }
             if (!Objects.equals(targetItem.getOwner(), sourceItem.getOwner())
-                || !Objects.equals(targetItem.getThrower(), sourceItem.getThrower())) {
+                || !Objects.equals(targetItem.getThrower(), sourceItem.getThrower())
+                || targetItem.canPlayerPickup() != sourceItem.canPlayerPickup()
+                || targetItem.canMobPickup() != sourceItem.canMobPickup()) {
+                continue;
+            }
+            targetItem.getLocation(locA);
+            sourceItem.getLocation(locB);
+            if (locA.distanceSquared(locB) > maxDistSq) {
                 continue;
             }
             targetStack = targetItem.getItemStack();
@@ -229,9 +238,12 @@ public final class SafeItemMergeHelper {
 
             targetStack.setAmount(postCombined);
             targetItem.setItemStack(targetStack);
-            targetItem.setPickupDelay(Math.min(targetItem.getPickupDelay(), sourceItem.getPickupDelay()));
-            // Preserve vanilla despawn age (younger of the two stacks) so freshly dropped items never despawn early
-            targetItem.setTicksLived(Math.max(1, Math.min(targetItem.getTicksLived(), sourceItem.getTicksLived())));
+            // R9: Match Purpur 1.21.4 ItemEntity.merge bytecode (Math.max pickupDelay, younger ticksLived)
+            targetItem.setPickupDelay(Math.max(targetItem.getPickupDelay(), sourceItem.getPickupDelay()));
+            int clampedSourceTicks = Math.max(1, sourceItem.getTicksLived());
+            if (clampedSourceTicks < targetItem.getTicksLived()) {
+                targetItem.setTicksLived(clampedSourceTicks);
+            }
             sourceItem.remove();
             mergedEntities++;
         }

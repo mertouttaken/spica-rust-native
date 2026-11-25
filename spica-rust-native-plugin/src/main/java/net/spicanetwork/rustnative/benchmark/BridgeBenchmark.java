@@ -137,14 +137,21 @@ public final class BridgeBenchmark {
         }
 
         // Warmup Flow-Field
+        requireNativeOk(probe, "computeFlowField");
         for (int w = 0; w < 3; w++) {
-            api.computeFlowField(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ);
+            requireNativeOk(
+                api.computeFlowField(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ),
+                "computeFlowField"
+            );
         }
 
         int reachable = probe;
         long tFlowStart = System.nanoTime();
         for (int k = 0; k < flowIters; k++) {
-            reachable = api.computeFlowField(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ);
+            reachable = requireNativeOk(
+                api.computeFlowField(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ),
+                "computeFlowField"
+            );
         }
         double flowFieldMs = (System.nanoTime() - tFlowStart) / 1_000_000.0 / flowIters;
 
@@ -162,14 +169,20 @@ public final class BridgeBenchmark {
         ByteBuffer outHeights = ByteBuffer.allocateDirect(noiseCells * Float.BYTES).order(ByteOrder.nativeOrder());
 
         for (int w = 0; w < 3; w++) {
-            api.generateNoise2D(0.0f, 0.0f, noiseW, noiseD, 1.0f, 0x51CA2026, noiseOctaves, 0.008f, 2.0f, 0.5f, outHeights);
+            requireNativeOk(
+                api.generateNoise2D(0.0f, 0.0f, noiseW, noiseD, 1.0f, 0x51CA2026, noiseOctaves, 0.008f, 2.0f, 0.5f, outHeights),
+                "generateNoise2D"
+            );
         }
 
         int noiseSamples = 0;
         long tNoiseStart = System.nanoTime();
         for (int k = 0; k < noiseIters; k++) {
-            noiseSamples = api.generateNoise2D(
-                0.0f, 0.0f, noiseW, noiseD, 1.0f, 0x51CA2026, noiseOctaves, 0.008f, 2.0f, 0.5f, outHeights
+            noiseSamples = requireNativeOk(
+                api.generateNoise2D(
+                    0.0f, 0.0f, noiseW, noiseD, 1.0f, 0x51CA2026, noiseOctaves, 0.008f, 2.0f, 0.5f, outHeights
+                ),
+                "generateNoise2D"
             );
         }
         double noiseMs = (System.nanoTime() - tNoiseStart) / 1_000_000.0 / noiseIters;
@@ -257,11 +270,14 @@ public final class BridgeBenchmark {
         // Warmup Mob Tracking kernel
         for (int w = 0; w < 3; w++) {
             clearDirectBuffer(visBitsetBuf, trackBitsetBytes);
-            api.computeMobTracking(
-                trackMobs, mobXsBuf, mobYsBuf, mobZsBuf, mobFlagsBuf,
-                trackPlayers, pXsBuf, pYsBuf, pZsBuf, pLookXsBuf, pLookYsBuf, pLookZsBuf,
-                48.0f, 12.0f, 24.0f, 16.0f, -0.25f, 72, BrainDirective.STATE_GREEN,
-                visBitsetBuf, trackMaxDeltas, outDeltaP, outDeltaM, outDeltaAct, outStatsBuf
+            requireNativeOk(
+                api.computeMobTracking(
+                    trackMobs, mobXsBuf, mobYsBuf, mobZsBuf, mobFlagsBuf,
+                    trackPlayers, pXsBuf, pYsBuf, pZsBuf, pLookXsBuf, pLookYsBuf, pLookZsBuf,
+                    48.0f, 12.0f, 24.0f, 16.0f, -0.25f, 72, BrainDirective.STATE_GREEN,
+                    visBitsetBuf, trackMaxDeltas, outDeltaP, outDeltaM, outDeltaAct, outStatsBuf
+                ),
+                "computeMobTracking"
             );
         }
 
@@ -270,11 +286,14 @@ public final class BridgeBenchmark {
         for (int k = 0; k < trackIters; k++) {
             clearDirectBuffer(visBitsetBuf, trackBitsetBytes);
             long tTrackStart = System.nanoTime();
-            trackDeltas = api.computeMobTracking(
-                trackMobs, mobXsBuf, mobYsBuf, mobZsBuf, mobFlagsBuf,
-                trackPlayers, pXsBuf, pYsBuf, pZsBuf, pLookXsBuf, pLookYsBuf, pLookZsBuf,
-                48.0f, 12.0f, 24.0f, 16.0f, -0.25f, 72, BrainDirective.STATE_GREEN,
-                visBitsetBuf, trackMaxDeltas, outDeltaP, outDeltaM, outDeltaAct, outStatsBuf
+            trackDeltas = requireNativeOk(
+                api.computeMobTracking(
+                    trackMobs, mobXsBuf, mobYsBuf, mobZsBuf, mobFlagsBuf,
+                    trackPlayers, pXsBuf, pYsBuf, pZsBuf, pLookXsBuf, pLookYsBuf, pLookZsBuf,
+                    48.0f, 12.0f, 24.0f, 16.0f, -0.25f, 72, BrainDirective.STATE_GREEN,
+                    visBitsetBuf, trackMaxDeltas, outDeltaP, outDeltaM, outDeltaAct, outStatsBuf
+                ),
+                "computeMobTracking"
             );
             trackNanos += (System.nanoTime() - tTrackStart);
         }
@@ -320,7 +339,10 @@ public final class BridgeBenchmark {
         // Warmup Java & Rust block diff
         for (int w = 0; w < 3; w++) {
             javaBlockDiff(diffW, diffH, diffD, jCur, jTar, diffMaxOut, jOutX, jOutY, jOutZ, jOutId);
-            api.computeBlockDiff(diffW, diffH, diffD, curBuf, tarBuf, diffMaxOut, outRelX, outRelY, outRelZ, outNewId);
+            requireNativeOk(
+                api.computeBlockDiff(diffW, diffH, diffD, curBuf, tarBuf, diffMaxOut, outRelX, outRelY, outRelZ, outNewId),
+                "computeBlockDiff"
+            );
         }
 
         long tJavaDiff = System.nanoTime();
@@ -332,8 +354,11 @@ public final class BridgeBenchmark {
         int diffChanged = 0;
         long tRustDiff = System.nanoTime();
         for (int k = 0; k < diffIters; k++) {
-            diffChanged = api.computeBlockDiff(
-                diffW, diffH, diffD, curBuf, tarBuf, diffMaxOut, outRelX, outRelY, outRelZ, outNewId
+            diffChanged = requireNativeOk(
+                api.computeBlockDiff(
+                    diffW, diffH, diffD, curBuf, tarBuf, diffMaxOut, outRelX, outRelY, outRelZ, outNewId
+                ),
+                "computeBlockDiff"
             );
         }
         double rustBlockDiffMs = (System.nanoTime() - tRustDiff) / 1_000_000.0 / diffIters;
@@ -404,6 +429,24 @@ public final class BridgeBenchmark {
             }
         }
         return total;
+    }
+
+    private static int requireNativeOk(int result, String kernelName) {
+        if (result < 0) {
+            throw new IllegalStateException(
+                "Rust native kernel '" + kernelName + "' failed with status code " + result
+            );
+        }
+        return result;
+    }
+
+    private static long requireNativeOkLong(long result, String kernelName) {
+        if (result < 0L) {
+            throw new IllegalStateException(
+                "Rust native kernel '" + kernelName + "' failed with status code " + result
+            );
+        }
+        return result;
     }
 
     private static void clearDirectBuffer(ByteBuffer buf, int length) {
@@ -481,10 +524,13 @@ public final class BridgeBenchmark {
 
         for (int w = 0; w < 3; w++) {
             javaCollisionsNaive(n, jx, jy, jz, jr, jOutX, jOutY, jOutZ, jOutCounts);
-            api.computeCollisions(arena, n, 1.5f, 0.5f, 0.4f);
+            requireNativeOkLong(api.computeCollisions(arena, n, 1.5f, 0.5f, 0.4f), "computeCollisions");
             javaAiTargets(n, m, jx, jy, jz, jpx, jpy, jpz, 32f, 56f, jOutIdx, jOutDist, jOutLod);
-            api.computeAiTargets(arena, n, m, 32f, 56f);
-            api.computeBoidsSteering(arena, n, 128f, 64f, 128f, 5f, 1.2f, 0.6f, 0.4f, 1.0f, 0.5f);
+            requireNativeOk(api.computeAiTargets(arena, n, m, 32f, 56f), "computeAiTargets");
+            requireNativeOk(
+                api.computeBoidsSteering(arena, n, 128f, 64f, 128f, 5f, 1.2f, 0.6f, 0.4f, 1.0f, 0.5f),
+                "computeBoidsSteering"
+            );
         }
 
         // 1) Pure Java Collisions (use fewer iterations if N is very large to keep benchmark snappy)
@@ -499,7 +545,7 @@ public final class BridgeBenchmark {
         long t1 = System.nanoTime();
         long rustPairs = 0;
         for (int k = 0; k < iters; k++) {
-            rustPairs = api.computeCollisions(arena, n, 1.5f, 0.5f, 0.4f);
+            rustPairs = requireNativeOkLong(api.computeCollisions(arena, n, 1.5f, 0.5f, 0.4f), "computeCollisions");
         }
         double rustCollMs = (System.nanoTime() - t1) / 1_000_000.0 / iters;
 
@@ -513,14 +559,17 @@ public final class BridgeBenchmark {
         // 4) Rust Parallel AI Target + LOD
         long t3 = System.nanoTime();
         for (int k = 0; k < iters; k++) {
-            api.computeAiTargets(arena, n, m, 32f, 56f);
+            requireNativeOk(api.computeAiTargets(arena, n, m, 32f, 56f), "computeAiTargets");
         }
         double rustAiMs = (System.nanoTime() - t3) / 1_000_000.0 / iters;
 
         // 5) Rust Boids Steering
         long t4 = System.nanoTime();
         for (int k = 0; k < iters; k++) {
-            api.computeBoidsSteering(arena, n, 128f, 64f, 128f, 5f, 1.2f, 0.6f, 0.4f, 1.0f, 0.5f);
+            requireNativeOk(
+                api.computeBoidsSteering(arena, n, 128f, 64f, 128f, 5f, 1.2f, 0.6f, 0.4f, 1.0f, 0.5f),
+                "computeBoidsSteering"
+            );
         }
         double rustBoidsMs = (System.nanoTime() - t4) / 1_000_000.0 / iters;
 

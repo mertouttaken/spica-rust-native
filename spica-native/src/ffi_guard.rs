@@ -41,13 +41,13 @@ impl<T> RawReadSpan<T> {
         }
     }
 
-    /// Converts the validated span into a Rust slice tied to the caller's lifetime.
+    /// Converts the validated span into a Rust slice tied to `&self`'s lifetime (R1).
     ///
     /// # Safety
     /// Caller guarantees the backing memory remains valid, initialized for `T`, and unmutated
-    /// for the entire lifetime `'a`.
+    /// for the borrow duration.
     #[inline]
-    pub unsafe fn as_slice<'a>(self) -> &'a [T] {
+    pub unsafe fn as_slice(&self) -> &[T] {
         if self.len == 0 {
             &[]
         } else {

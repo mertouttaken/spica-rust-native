@@ -46,6 +46,7 @@ public final class BrainIpcClient {
     private static final int CONNECT_TIMEOUT_MS = 3_000;
     private static final int READ_TIMEOUT_MS = 150;
     private static final int HANDSHAKE_ACK_TIMEOUT_MS = 5_000;
+    private static final int IPC_PROTOCOL_VERSION = 2;
     private static final long FRAME_READ_DEADLINE_NANOS = 5_000_000_000L;
     private static final int MAX_INCOMING_LINE_BYTES = 64 * 1024;
     private static final long RECONNECT_DELAY_MS = 5_000L;
@@ -312,13 +313,19 @@ public final class BrainIpcClient {
                 InputStream in = new BufferedInputStream(socket.getInputStream(), 4096);
                 FrameReader frameReader = new FrameReader(MAX_INCOMING_LINE_BYTES);
 
-                String nonce = generateNonceHex();
-                sendHandshake(writer, nonce);
+                // R5 + R14: Zero-disclosure mutual challenge-response within a single wall-clock deadline
+                long handshakeDeadline = System.nanoTime() + (HANDSHAKE_ACK_TIMEOUT_MS * 1_000_000L);
+                String challengeLine = frameReader.readNextLine(socket, in, handshakeDeadline);
+                String serverNonce = parseHelloChallengeNonce(challengeLine);
+                if (serverNonce == null) {
+                    throw new IOException("spica-launcher hello_challenge alinamadi veya gecersiz");
+                }
 
-                // Y7: Wait for mutually-authenticated HMAC-SHA256 hello_ack within strict wall-clock deadline
-                long ackDeadline = System.nanoTime() + (HANDSHAKE_ACK_TIMEOUT_MS * 1_000_000L);
-                String ackLine = frameReader.readNextLine(in, ackDeadline);
-                if (ackLine == null || !verifyHelloAck(ackLine, nonce, token)) {
+                String clientNonce = generateNonceHex();
+                sendHandshake(writer, serverNonce, clientNonce);
+
+                String ackLine = frameReader.readNextLine(socket, in, handshakeDeadline);
+                if (ackLine == null || !verifyHelloAck(ackLine, clientNonce, serverNonce, token)) {
                     throw new IOException("spica-launcher hello_ack HMAC dogrulamasi basarisiz oldu");
                 }
 
@@ -398,19 +405,29 @@ public final class BrainIpcClient {
             this.maxBytes = maxBytes;
         }
 
-        String readNextLine(InputStream in, long deadlineNanos) throws IOException {
+        String readNextLine(Socket socket, InputStream in, long deadlineNanos) throws IOException {
             while (true) {
-                if (System.nanoTime() > deadlineNanos) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0L) {
                     throw new IOException("IPC handshake/frame wall-clock deadline exceeded");
                 }
+                int remainingMs = (int) Math.clamp((remainingNanos + 999_999L) / 1_000_000L, 1L, Integer.MAX_VALUE);
+                socket.setSoTimeout(remainingMs);
+
                 int b = in.read();
                 if (b < 0) {
                     if (buf.size() == 0) {
                         return null;
                     }
+                    if (deadlineNanos - System.nanoTime() <= 0L) {
+                        throw new IOException("IPC handshake/frame wall-clock deadline exceeded");
+                    }
                     return flushLine();
                 }
                 if (b == '\n') {
+                    if (deadlineNanos - System.nanoTime() <= 0L) {
+                        throw new IOException("IPC handshake/frame wall-clock deadline exceeded");
+                    }
                     return flushLine();
                 }
                 if (b != '\r') {
@@ -468,8 +485,52 @@ public final class BrainIpcClient {
         return HexFormat.of().formatHex(bytes);
     }
 
-    private static boolean verifyHelloAck(String line, String nonce, String expectedToken) {
-        if (expectedToken == null || expectedToken.isEmpty() || nonce == null || nonce.isEmpty()) {
+    private static boolean isValidNonce(String nonce) {
+        if (nonce == null || nonce.length() < 16 || nonce.length() > 128) {
+            return false;
+        }
+        for (int i = 0; i < nonce.length(); i++) {
+            char c = nonce.charAt(i);
+            boolean alnum = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+            if (!alnum) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static String parseHelloChallengeNonce(String line) {
+        if (line == null || line.isBlank()) {
+            return null;
+        }
+        try {
+            JsonElement parsed = JsonParser.parseString(line.trim());
+            if (!parsed.isJsonObject()) {
+                return null;
+            }
+            JsonObject obj = parsed.getAsJsonObject();
+            if (!"hello_challenge".equalsIgnoreCase(getString(obj, "type", ""))) {
+                return null;
+            }
+            if (getInt(obj, "protocol", 0) != IPC_PROTOCOL_VERSION) {
+                return null;
+            }
+            String serverNonce = getString(obj, "nonce", "");
+            return isValidNonce(serverNonce) ? serverNonce : null;
+        } catch (RuntimeException ex) {
+            return null;
+        }
+    }
+
+    private static boolean verifyHelloAck(
+        String line,
+        String clientNonce,
+        String serverNonce,
+        String expectedToken
+    ) {
+        if (expectedToken == null || expectedToken.isEmpty()
+            || !isValidNonce(clientNonce)
+            || !isValidNonce(serverNonce)) {
             return false;
         }
         try {
@@ -479,7 +540,8 @@ public final class BrainIpcClient {
             }
             JsonObject obj = parsed.getAsJsonObject();
             if (!"hello_ack".equalsIgnoreCase(getString(obj, "type", ""))
-                || !"ok".equalsIgnoreCase(getString(obj, "status", ""))) {
+                || !"ok".equalsIgnoreCase(getString(obj, "status", ""))
+                || getInt(obj, "protocol", 0) != IPC_PROTOCOL_VERSION) {
                 return false;
             }
             long connId = getLong(obj, "connId", 0L);
@@ -487,7 +549,10 @@ public final class BrainIpcClient {
             if (connId <= 0L || proof.isEmpty()) {
                 return false;
             }
-            String expectedProof = computeHmacSha256Hex(expectedToken, "spica-ipc-v1:" + nonce + ":" + connId);
+            String expectedProof = computeHmacSha256Hex(
+                expectedToken,
+                "spica-ipc-v2-server:" + clientNonce + ":" + serverNonce + ":" + connId
+            );
             return MessageDigest.isEqual(
                 proof.getBytes(StandardCharsets.UTF_8),
                 expectedProof.getBytes(StandardCharsets.UTF_8)
@@ -504,11 +569,24 @@ public final class BrainIpcClient {
         return HexFormat.of().formatHex(digest);
     }
 
-    private void sendHandshake(BufferedWriter writer, String nonce) throws IOException {
+    private void sendHandshake(BufferedWriter writer, String serverNonce, String clientNonce) throws IOException {
+        if (token == null || token.isEmpty()) {
+            throw new IOException("SPICA_IPC_TOKEN tanimli degil; sifir-aciga-cikarma el sikismasi baslatilamadi");
+        }
+        String clientProof;
+        try {
+            clientProof = computeHmacSha256Hex(
+                token,
+                "spica-ipc-v2-client:" + serverNonce + ":" + clientNonce
+            );
+        } catch (GeneralSecurityException ex) {
+            throw new IOException("HmacSHA256 hesaplanamadi: " + ex.getMessage(), ex);
+        }
+
         JsonObject hello = new JsonObject();
         hello.addProperty("type", "hello");
-        hello.addProperty("token", token);
-        hello.addProperty("nonce", nonce);
+        hello.addProperty("clientNonce", clientNonce);
+        hello.addProperty("clientProof", clientProof);
         hello.addProperty("server", SERVER_FLAVOR);
         hello.addProperty("pluginVersion", PLUGIN_VERSION);
 

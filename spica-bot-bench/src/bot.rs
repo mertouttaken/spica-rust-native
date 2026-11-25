@@ -410,7 +410,8 @@ pub async fn run_bot(
                     }
                 };
 
-                let record = metrics.measuring.load(Ordering::Relaxed);
+                // R15: Count packets ONLY for bots in the ready cohort (same cohort as active_ready_play)
+                let record = marked_ready && metrics.measuring.load(Ordering::Relaxed);
                 if record {
                     metrics.total_packets_in.fetch_add(1, Ordering::Relaxed);
                     metrics.total_bytes_in.fetch_add(pkt.wire_bytes as u64, Ordering::Relaxed);

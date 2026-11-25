@@ -4,10 +4,12 @@ import org.bukkit.Bukkit;
 import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Mob;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityRemoveEvent;
 import org.bukkit.event.world.EntitiesLoadEvent;
@@ -41,6 +43,8 @@ public final class MobAiOwnershipManager implements Listener {
 
     public static final int REASON_LOD = 1;
     public static final int REASON_FARM = 2;
+    /** Third-party plugins may attach this Bukkit metadata key to permanently opt a mob out of Spica AI/collision suppression (R7). */
+    public static final String OPT_OUT_METADATA = "spica_ignore";
 
     private static final byte TAG_ACTIVE = 1;
 
@@ -62,6 +66,16 @@ public final class MobAiOwnershipManager implements Listener {
      */
     public boolean suppressAi(Mob mob, int reason) {
         if (mob == null || !mob.isValid() || mob.isDead()) {
+            return false;
+        }
+        // R6: BeehiveBlockEntity.addOccupant serializes Bee NBT BEFORE EntityRemoveEvent(ENTER_BLOCK);
+        // never suppress Bee AI so Bukkit.Aware=0b can never be baked into beehive occupant NBT.
+        // R7: Respect third-party opt-out metadata ("spica_ignore") and drop any prior Spica ownership cleanly.
+        if (mob.hasMetadata(OPT_OUT_METADATA)) {
+            disownOptedOutMob(mob);
+            return false;
+        }
+        if (mob.getType() == EntityType.BEE) {
             return false;
         }
         UUID id = mob.getUniqueId();
@@ -95,6 +109,10 @@ public final class MobAiOwnershipManager implements Listener {
      */
     public boolean releaseAi(Mob mob, int reason) {
         if (mob == null) {
+            return false;
+        }
+        if (mob.hasMetadata(OPT_OUT_METADATA)) {
+            disownOptedOutMob(mob);
             return false;
         }
         UUID id = mob.getUniqueId();
@@ -133,6 +151,13 @@ public final class MobAiOwnershipManager implements Listener {
         if (mob == null || !mob.isValid() || mob.isDead()) {
             return false;
         }
+        if (mob.hasMetadata(OPT_OUT_METADATA)) {
+            disownOptedOutMob(mob);
+            return false;
+        }
+        if (mob.getType() == EntityType.BEE) {
+            return false;
+        }
         UUID id = mob.getUniqueId();
         if (collisionOwned.contains(id)) {
             if (mob.isCollidable()) {
@@ -162,6 +187,10 @@ public final class MobAiOwnershipManager implements Listener {
         if (mob == null) {
             return false;
         }
+        if (mob.hasMetadata(OPT_OUT_METADATA)) {
+            disownOptedOutMob(mob);
+            return false;
+        }
         UUID id = mob.getUniqueId();
         boolean owned = collisionOwned.remove(id);
         boolean tagged = hasTag(mob, collisionTagKey);
@@ -182,6 +211,10 @@ public final class MobAiOwnershipManager implements Listener {
      */
     public boolean releaseAllForInteract(Mob mob) {
         if (mob == null) {
+            return false;
+        }
+        if (mob.hasMetadata(OPT_OUT_METADATA)) {
+            disownOptedOutMob(mob);
             return false;
         }
         UUID id = mob.getUniqueId();
@@ -250,7 +283,7 @@ public final class MobAiOwnershipManager implements Listener {
             Entity entity = Bukkit.getEntity(id);
             if (entity instanceof Mob mob) {
                 clearTag(mob, aiTagKey);
-                if (!mob.isAware()) {
+                if (!mob.hasMetadata(OPT_OUT_METADATA) && !mob.isAware()) {
                     mob.setAware(true);
                     restored++;
                 }
@@ -268,7 +301,7 @@ public final class MobAiOwnershipManager implements Listener {
             Entity entity = Bukkit.getEntity(id);
             if (entity instanceof Mob mob) {
                 clearTag(mob, collisionTagKey);
-                if (!mob.isCollidable()) {
+                if (!mob.hasMetadata(OPT_OUT_METADATA) && !mob.isCollidable()) {
                     mob.setCollidable(true);
                     restored++;
                 }
@@ -363,6 +396,23 @@ public final class MobAiOwnershipManager implements Listener {
         }
     }
 
+    /**
+     * R6: Recovers any mob emerging from a block (e.g. legacy beehive occupant spawned via
+     * {@link CreatureSpawnEvent.SpawnReason#BEEHIVE}) that still carries an orphaned Spica PDC tag.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onCreatureSpawn(CreatureSpawnEvent event) {
+        if (!(event.getEntity() instanceof Mob mob)) {
+            return;
+        }
+        UUID id = mob.getUniqueId();
+        boolean orphanedAi = !aiReasons.containsKey(id) && hasTag(mob, aiTagKey);
+        boolean orphanedCol = !collisionOwned.contains(id) && hasTag(mob, collisionTagKey);
+        if (orphanedAi || orphanedCol) {
+            restoreTaggedMob(mob, orphanedAi, orphanedCol);
+        }
+    }
+
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onEntityDeath(EntityDeathEvent event) {
         UUID id = event.getEntity().getUniqueId();
@@ -393,7 +443,19 @@ public final class MobAiOwnershipManager implements Listener {
         }
     }
 
+    private void disownOptedOutMob(Mob mob) {
+        UUID id = mob.getUniqueId();
+        aiReasons.remove(id);
+        collisionOwned.remove(id);
+        clearTag(mob, aiTagKey);
+        clearTag(mob, collisionTagKey);
+    }
+
     private boolean restoreTaggedMob(Mob mob, boolean restoreAi, boolean restoreCol) {
+        if (mob.hasMetadata(OPT_OUT_METADATA)) {
+            disownOptedOutMob(mob);
+            return false;
+        }
         boolean changed = false;
         if (restoreAi) {
             clearTag(mob, aiTagKey);

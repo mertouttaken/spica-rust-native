@@ -97,8 +97,10 @@ struct CancellableFileReader<'a> {
 impl<'a> Read for CancellableFileReader<'a> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.cancel_gate.is_cancelled() {
+            // R2 CRITICAL: MUST NOT return ErrorKind::Interrupted because std::io::copy
+            // (used inside tar::Builder::append_data and GZIP drain) retries Interrupted forever!
             return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
+                io::ErrorKind::Other,
                 BACKUP_CANCELLED_ERR,
             ));
         }
@@ -168,7 +170,7 @@ fn verify_tar_gz_integrity(
     let mut archive = tar::Archive::new(gz);
     let mut count = 0usize;
     let entries = archive.entries().map_err(|e| {
-        if cancel_gate.is_cancelled() || e.kind() == io::ErrorKind::Interrupted {
+        if cancel_gate.is_cancelled() {
             BACKUP_CANCELLED_ERR.to_string()
         } else {
             format!("Yedek TAR akisi bozuk: {}", e)
@@ -179,7 +181,7 @@ fn verify_tar_gz_integrity(
             return Err(BACKUP_CANCELLED_ERR.to_string());
         }
         let _entry = entry_res.map_err(|e| {
-            if cancel_gate.is_cancelled() || e.kind() == io::ErrorKind::Interrupted {
+            if cancel_gate.is_cancelled() {
                 BACKUP_CANCELLED_ERR.to_string()
             } else {
                 format!("Yedek icinde bozuk kayit: {}", e)
@@ -196,7 +198,7 @@ fn verify_tar_gz_integrity(
     // Drain the remaining GZIP stream to EOF so flate2 verifies the CRC32 & ISIZE trailer
     let mut gz = archive.into_inner();
     io::copy(&mut gz, &mut io::sink()).map_err(|e| {
-        if cancel_gate.is_cancelled() || e.kind() == io::ErrorKind::Interrupted {
+        if cancel_gate.is_cancelled() {
             BACKUP_CANCELLED_ERR.to_string()
         } else {
             format!("Yedek GZIP CRC32/kuyruk dogrulamasi basarisiz: {}", e)
@@ -363,6 +365,9 @@ pub fn create_world_backup_cancellable(
                         e
                     )
                 })?;
+                let pre_len = meta.len();
+                let pre_mtime = meta.modified().ok();
+
                 let mut header = tar::Header::new_gnu();
                 header.set_metadata(&meta);
                 header.set_cksum();
@@ -372,13 +377,32 @@ pub fn create_world_backup_cancellable(
                     cancel_gate,
                 };
                 if let Err(err) = tar_builder.append_data(&mut header, &archive_rel, &mut reader) {
-                    if cancel_gate.is_cancelled() || err.kind() == io::ErrorKind::Interrupted {
+                    if cancel_gate.is_cancelled() {
                         return Err(BACKUP_CANCELLED_ERR.to_string());
                     }
                     return Err(format!(
                         "Dosya arsivlenemedi ({}): {}",
                         entry_path.display(),
                         err
+                    ));
+                }
+
+                // R3: Detect concurrent third-party world writes or file deletion/replacement mid-copy (fail-closed torn snapshot guard)
+                let post_meta = fs::metadata(entry_path).map_err(|e| {
+                    format!(
+                        "Tutarsiz snapshot tespit edildi: '{}' arsivleme sirasinda silindi veya erisilemez oldu ({}); yedek iptal edildi.",
+                        entry_path.display(),
+                        e
+                    )
+                })?;
+                let post_len = post_meta.len();
+                let post_mtime = post_meta.modified().ok();
+                if post_len != pre_len || post_mtime != pre_mtime {
+                    return Err(format!(
+                        "Tutarsiz snapshot tespit edildi: '{}' arsivleme sirasinda degisti (len {}->{}); yedek iptal edildi.",
+                        entry_path.display(),
+                        pre_len,
+                        post_len
                     ));
                 }
                 files_archived += 1;
@@ -438,6 +462,23 @@ pub fn create_world_backup_cancellable(
             e
         )
     })?;
+
+    // R11: Sync backup directory entry on Unix BEFORE rotating/deleting older archives
+    #[cfg(unix)]
+    {
+        let dir_handle = File::open(&backup_dir).map_err(|e| {
+            format!(
+                "Yedek dizini fsync icin acilamadi (eski yedekler korundu): {}",
+                e
+            )
+        })?;
+        dir_handle.sync_all().map_err(|e| {
+            format!(
+                "Yedek dizini diske esitlenemedi (eski yedekler korundu): {}",
+                e
+            )
+        })?;
+    }
 
     let size_bytes = fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
     let rotated_deleted = rotate_old_backups(&backup_dir, cfg.keep_last);
@@ -690,6 +731,38 @@ mod tests {
         let res_strict = create_world_backup(&work_dir, &strict_cfg);
         assert!(res_strict.is_err());
         assert!(res_strict.unwrap_err().contains("require_all_worlds"));
+
+        let _ = fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
+    fn test_mid_read_cancellation_aborts_io_copy_immediately() {
+        // R2 regression test: cancelling mid-file MUST terminate std::io::copy / tar::Builder
+        // immediately instead of retrying ErrorKind::Interrupted forever.
+        let work_dir = make_temp_dir("mid-cancel");
+        let src_path = work_dir.join("big.bin");
+        fs::write(&src_path, vec![0xABu8; 256 * 1024]).expect("write big file");
+
+        let gate = BackupCancelGate::new();
+        let file = File::open(&src_path).expect("open big file");
+        let mut reader = CancellableFileReader {
+            inner: file,
+            cancel_gate: &gate,
+        };
+
+        // Read first 4 KiB normally, then cancel and invoke std::io::copy
+        let mut first = [0u8; 4096];
+        assert_eq!(reader.read(&mut first).expect("initial read"), 4096);
+        assert!(gate.request_cancel());
+
+        let started = Instant::now();
+        let copy_res = io::copy(&mut reader, &mut io::sink());
+        assert!(copy_res.is_err(), "Mid-read cancel MUST error out of std::io::copy");
+        assert_eq!(copy_res.unwrap_err().kind(), io::ErrorKind::Other);
+        assert!(
+            started.elapsed().as_millis() < 250,
+            "Mid-read cancel must abort immediately without retry spin"
+        );
 
         let _ = fs::remove_dir_all(&work_dir);
     }

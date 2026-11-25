@@ -21,6 +21,8 @@ import java.util.logging.Logger;
  */
 public final class NativeLoader {
 
+    public static final int REQUIRED_ABI_REV = 2;
+
     private static volatile boolean loaded = false;
     private static volatile String loadedPath = "unloaded";
 
@@ -96,9 +98,16 @@ public final class NativeLoader {
             }
         }
 
-        // 3) Exact SemVer ABI verification BEFORE setting loaded = true (prevents poisoned state on mismatch)
+        // 3) Strict ABI revision + exact SemVer verification BEFORE setting loaded = true (R13)
+        String nativeInfo = RustNative.nativeGetInfo();
+        int nativeAbiRev = extractNativeAbiRev(nativeInfo);
+        if (nativeAbiRev != REQUIRED_ABI_REV) {
+            throw new IOException(
+                "Native ABI revizyon uyusmazligi: beklenen abi=" + REQUIRED_ABI_REV
+                    + ", bulunan='" + nativeInfo + "'"
+            );
+        }
         if (expectedPluginVersion != null && !expectedPluginVersion.isBlank()) {
-            String nativeInfo = RustNative.nativeGetInfo();
             String nativeVersion = extractNativeVersion(nativeInfo);
             String normalizedExpected = normalizeExpectedVersion(expectedPluginVersion);
             if (nativeVersion == null || !nativeVersion.equals(normalizedExpected)) {
@@ -114,7 +123,7 @@ public final class NativeLoader {
     }
 
     /**
-     * Extracts exact version token from `"spica-rust-native v2.6.0 | os=... | threads=..."`.
+     * Extracts exact version token from `"spica-rust-native v2.6.0 | abi=2 | os=... | threads=..."`.
      */
     static String extractNativeVersion(String nativeInfo) {
         if (nativeInfo == null) {
@@ -129,6 +138,28 @@ public final class NativeLoader {
         int sep = nativeInfo.indexOf(" |", verStart);
         String token = (sep > verStart) ? nativeInfo.substring(verStart, sep) : nativeInfo.substring(verStart);
         return token.trim();
+    }
+
+    /**
+     * Extracts integer ABI revision from `"| abi=<rev>"`, returning -1 if missing or malformed.
+     */
+    static int extractNativeAbiRev(String nativeInfo) {
+        if (nativeInfo == null) {
+            return -1;
+        }
+        String marker = "| abi=";
+        int start = nativeInfo.indexOf(marker);
+        if (start < 0) {
+            return -1;
+        }
+        int valStart = start + marker.length();
+        int sep = nativeInfo.indexOf(" |", valStart);
+        String token = (sep > valStart) ? nativeInfo.substring(valStart, sep) : nativeInfo.substring(valStart);
+        try {
+            return Integer.parseInt(token.trim());
+        } catch (NumberFormatException ex) {
+            return -1;
+        }
     }
 
     private static String normalizeExpectedVersion(String pluginVersion) {

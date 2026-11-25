@@ -50,12 +50,14 @@ pub fn init_thread_pool(requested: usize) -> usize {
     pool.current_num_threads()
 }
 
-/// Number of active worker threads in the Rust pool.
+/// Number of active worker threads in the Rust pool (`0` if `init_thread_pool` has not run yet).
+/// Intentionally side-effect-free so `nativeGetInfo()` NEVER locks the `OnceLock` pool before
+/// `nativeInitPool(requested)` applies configured/launcher worker thread counts (R12).
 pub fn active_threads() -> usize {
     WORKER_POOL
         .get()
         .map(|p| p.current_num_threads())
-        .unwrap_or_else(|| init_thread_pool(0))
+        .unwrap_or(0)
 }
 
 /// Execute a closure inside the dedicated Spica Rayon pool.
