@@ -3,7 +3,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
 
-use crate::{governor, kernels};
+use crate::{farm_governor, governor, kernels};
 
 /// Initialize the Rayon worker thread pool. Pass `0` to auto-select optimal thread count.
 /// Returns active thread count, or `-1` on error.
@@ -222,6 +222,94 @@ pub unsafe extern "C" fn spica_evaluate_governor(
         out_floats[3] = result.ewma_mspt;
 
         result.state_code
+    }))
+    .unwrap_or(-1)
+}
+
+/// Evaluate the Farm & Villager Governor via raw C pointers (zero-copy).
+///
+/// Returns the number of throttled entities (`out_actions[i] != ACTION_NORMAL`), or `-1` on error.
+///
+/// # Safety
+/// All entity pointers must be non-null, properly aligned for `f32`/`i32`, and valid for
+/// `entity_count` elements. If `player_count > 0`, all player pointers must be non-null,
+/// aligned, and valid for `player_count` elements.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn spica_evaluate_farm_throttling(
+    entity_count: usize,
+    xs: *const f32,
+    ys: *const f32,
+    zs: *const f32,
+    entity_flags: *const i32,
+    player_count: usize,
+    player_xs: *const f32,
+    player_ys: *const f32,
+    player_zs: *const f32,
+    crowd_radius: f32,
+    mild_crowd_threshold: i32,
+    severe_crowd_threshold: i32,
+    chunk_mob_limit: i32,
+    villager_wake_range: f32,
+    villager_crowd_threshold: i32,
+    brain_state_code: i32,
+    out_actions: *mut i32,
+    out_neighbor_counts: *mut i32,
+) -> i32 {
+    if entity_count == 0 {
+        return 0;
+    }
+    if xs.is_null()
+        || ys.is_null()
+        || zs.is_null()
+        || entity_flags.is_null()
+        || out_actions.is_null()
+        || out_neighbor_counts.is_null()
+        || (player_count > 0
+            && (player_xs.is_null() || player_ys.is_null() || player_zs.is_null()))
+    {
+        return -1;
+    }
+
+    catch_unwind(AssertUnwindSafe(|| {
+        let xs_s = slice::from_raw_parts(xs, entity_count);
+        let ys_s = slice::from_raw_parts(ys, entity_count);
+        let zs_s = slice::from_raw_parts(zs, entity_count);
+        let flags_s = slice::from_raw_parts(entity_flags, entity_count);
+
+        let (pxs_s, pys_s, pzs_s): (&[f32], &[f32], &[f32]) = if player_count > 0 {
+            (
+                slice::from_raw_parts(player_xs, player_count),
+                slice::from_raw_parts(player_ys, player_count),
+                slice::from_raw_parts(player_zs, player_count),
+            )
+        } else {
+            (&[], &[], &[])
+        };
+
+        let oa = slice::from_raw_parts_mut(out_actions, entity_count);
+        let on = slice::from_raw_parts_mut(out_neighbor_counts, entity_count);
+
+        crate::run_in_pool(|| {
+            farm_governor::evaluate_farm_throttling(
+                xs_s,
+                ys_s,
+                zs_s,
+                flags_s,
+                pxs_s,
+                pys_s,
+                pzs_s,
+                crowd_radius,
+                mild_crowd_threshold,
+                severe_crowd_threshold,
+                chunk_mob_limit,
+                villager_wake_range,
+                villager_crowd_threshold,
+                brain_state_code,
+                oa,
+                on,
+            )
+        })
     }))
     .unwrap_or(-1)
 }

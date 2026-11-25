@@ -8,6 +8,7 @@ import net.spicanetwork.rustnative.brain.BrainActuator;
 import net.spicanetwork.rustnative.brain.BrainDirective;
 import net.spicanetwork.rustnative.nativebridge.NativeLoader;
 import net.spicanetwork.rustnative.optimizer.EntityLodOptimizer;
+import net.spicanetwork.rustnative.optimizer.FarmVillagerGovernor;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -38,6 +39,7 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
         switch (args[0].toLowerCase(Locale.ROOT)) {
             case "status" -> handleStatus(sender);
             case "brain" -> handleBrain(sender);
+            case "farms" -> handleFarms(sender);
             case "chunks" -> handleChunks(sender, args);
             case "bench" -> handleBench(sender, args);
             case "scan" -> handleScan(sender, args);
@@ -49,10 +51,11 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
 
     private void handleStatus(CommandSender sender) {
         EntityLodOptimizer opt = plugin.getOptimizer();
+        FarmVillagerGovernor farms = plugin.getFarmGovernor();
         BrainActuator brain = plugin.getBrainActuator();
         BrainDirective dir = brain != null ? brain.getLastDirective() : null;
 
-        sender.sendMessage(Component.text("=== SpicaRustNative v2.0.0 Durum ===", NamedTextColor.GOLD));
+        sender.sendMessage(Component.text("=== SpicaRustNative v2.1.0 Durum ===", NamedTextColor.GOLD));
         sender.sendMessage(Component.text("Platform: " + NativeLoader.detectPlatformKey(), NamedTextColor.GRAY));
         sender.sendMessage(Component.text("Native Engine: " + plugin.getApi().getNativeInfo(), NamedTextColor.AQUA));
         sender.sendMessage(Component.text("Kutuphane: " + NativeLoader.getLoadedPath(), NamedTextColor.DARK_GRAY));
@@ -68,6 +71,20 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
             ),
             NamedTextColor.GREEN
         ));
+        if (farms != null) {
+            sender.sendMessage(Component.text(
+                String.format(
+                    Locale.US,
+                    "Farm Governor: %s | Rust: %.3f ms | Farm: %d | Carpisma Kapali: %d | Koylu: %d",
+                    farms.isEnabled() ? "AKTIF" : "KAPALI",
+                    farms.getLastRustComputeMs(),
+                    farms.getLastFarmThrottled(),
+                    farms.getLastCollisionDisabled(),
+                    farms.getLastVillagersThrottled()
+                ),
+                NamedTextColor.YELLOW
+            ));
+        }
         if (brain != null) {
             String mode = brain.isLauncherConnected() ? "LAUNCHER IPC" : "IN-PROCESS RUST";
             String state = dir != null ? dir.state() : "BEKLENIYOR";
@@ -84,6 +101,92 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
                 stateColor
             ));
         }
+    }
+
+    private void handleFarms(CommandSender sender) {
+        FarmVillagerGovernor farms = plugin.getFarmGovernor();
+        if (farms == null) {
+            sender.sendMessage(Component.text("Farm & Villager Governor modulu baslatilmadi.", NamedTextColor.RED));
+            return;
+        }
+
+        int stateCode = farms.getLastBrainStateCode();
+        String stateName = BrainDirective.stateNameForCode(stateCode);
+
+        sender.sendMessage(Component.text("=== SpicaRustNative Farm & Villager Governor ===", NamedTextColor.GOLD));
+        sender.sendMessage(Component.text(
+            String.format(
+                Locale.US,
+                "Durum: %s | Koylu Optimizasyonu: %s | Rust Hesaplama: %.3f ms (Toplam: %.3f ms)",
+                farms.isEnabled() ? "AKTIF" : "KAPALI",
+                farms.isVillagerOptimizationEnabled() ? "AKTIF" : "KAPALI",
+                farms.getLastRustComputeMs(),
+                farms.getLastRunMs()
+            ),
+            farms.isEnabled() ? NamedTextColor.GREEN : NamedTextColor.RED
+        ));
+        sender.sendMessage(Component.text(
+            String.format(
+                Locale.US,
+                "Taranan Mob: %d | Throttled Farm Mob: %d | Carpisma Kapali: %d | Throttled Koylu: %d",
+                farms.getLastTotalMobs(),
+                farms.getLastFarmThrottled(),
+                farms.getLastCollisionDisabled(),
+                farms.getLastVillagersThrottled()
+            ),
+            NamedTextColor.AQUA
+        ));
+
+        if (!farms.isVillagerOptimizationEnabled() || farms.getSecondsUntilNextRestockPulse() < 0) {
+            sender.sendMessage(Component.text(
+                "Restock Pulse: PASIF (Koylu optimizasyonu veya periyodik pulse devre disi)",
+                NamedTextColor.GRAY
+            ));
+        } else if (farms.isInRestockPulse()) {
+            sender.sendMessage(Component.text(
+                String.format(
+                    Locale.US,
+                    "Restock Pulse: AKTIF (Koyluler stok yenileme icin uyanik! Kalan: %ds / Periyot: %ds)",
+                    farms.getRestockPulseRemainingSeconds(),
+                    farms.getRestockPulseIntervalSeconds()
+                ),
+                NamedTextColor.GREEN
+            ));
+        } else {
+            sender.sendMessage(Component.text(
+                String.format(
+                    Locale.US,
+                    "Restock Pulse: BEKLEMEDE (Sonraki pulse: %ds sonra | Sure: %ds / Periyot: %ds)",
+                    farms.getSecondsUntilNextRestockPulse(),
+                    farms.getRestockPulseDurationSeconds(),
+                    farms.getRestockPulseIntervalSeconds()
+                ),
+                NamedTextColor.YELLOW
+            ));
+        }
+
+        sender.sendMessage(Component.text(
+            String.format(
+                Locale.US,
+                "Farm Esikleri: Yaricap=%.1f | Hafif(Carpisma)=%d | Agir(AI+Carpisma)=%d | Chunk Limiti=%d",
+                farms.getCrowdRadius(),
+                farms.getMildCrowdThreshold(),
+                farms.getSevereCrowdThreshold(),
+                farms.getChunkMobLimit()
+            ),
+            NamedTextColor.LIGHT_PURPLE
+        ));
+        sender.sendMessage(Component.text(
+            String.format(
+                Locale.US,
+                "Koylu Esikleri: Uyanma=%.1f blok | Kalabalik=%d | Etkilesim Koruma=%ds | Brain=%s",
+                farms.getVillagerWakeRange(),
+                farms.getVillagerCrowdThreshold(),
+                farms.getInteractGraceSeconds(),
+                stateName
+            ),
+            colorForState(stateCode)
+        ));
     }
 
     private void handleBrain(CommandSender sender) {
@@ -303,9 +406,10 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
     }
 
     private void sendHelp(CommandSender sender) {
-        sender.sendMessage(Component.text("=== SpicaRustNative v2.0.0 Komutlari ===", NamedTextColor.GOLD));
-        sender.sendMessage(Component.text("/rustbridge status - Native motor, Brain ve optimizer durumu", NamedTextColor.GRAY));
+        sender.sendMessage(Component.text("=== SpicaRustNative v2.1.0 Komutlari ===", NamedTextColor.GOLD));
+        sender.sendMessage(Component.text("/rustbridge status - Native motor, Brain, Farm ve optimizer durumu", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge brain - Rust Brain (IPC/In-Process) canli direktif ve metrikler", NamedTextColor.GRAY));
+        sender.sendMessage(Component.text("/rustbridge farms - Mob farm & koylu (trading hall) governor durumu", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge chunks [dunya] - Rust O(N) en yogun Top 8 chunk haritasi", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge bench [entity] [oyuncu] [iter] - Java vs Rust MSPT testi", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge scan [dunya] - Canli mob sikismasi / farm taramasi", NamedTextColor.GRAY));
@@ -347,7 +451,7 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
-            return List.of("status", "brain", "chunks", "bench", "scan", "reload");
+            return List.of("status", "brain", "farms", "chunks", "bench", "scan", "reload");
         }
         if (args.length == 2 && (args[0].equalsIgnoreCase("scan") || args[0].equalsIgnoreCase("chunks"))) {
             return Bukkit.getWorlds().stream().map(World::getName).toList();

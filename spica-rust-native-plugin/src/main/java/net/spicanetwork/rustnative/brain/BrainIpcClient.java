@@ -28,7 +28,7 @@ import java.util.logging.Logger;
  */
 public final class BrainIpcClient {
 
-    public static final String PLUGIN_VERSION = "2.0.0";
+    public static final String PLUGIN_VERSION = "2.1.0";
     public static final String SERVER_FLAVOR = "purpur-1.21.4";
 
     private static final int CONNECT_TIMEOUT_MS = 3_000;
@@ -111,6 +111,24 @@ public final class BrainIpcClient {
         long heapUsedMb,
         long heapMaxMb
     ) {
+        submitTelemetry(mspt, tps, entities, hibernated, players, loadedChunks, heapUsedMb, heapMaxMb, 0, 0);
+    }
+
+    /**
+     * Non-blocking single-slot telemetry submission including Farm & Villager Governor metrics.
+     */
+    public void submitTelemetry(
+        double mspt,
+        double tps,
+        int entities,
+        int hibernated,
+        int players,
+        int loadedChunks,
+        long heapUsedMb,
+        long heapMaxMb,
+        int farmThrottled,
+        int villagersThrottled
+    ) {
         if (!enabled || !running.get() || !connected.get()) {
             return;
         }
@@ -125,6 +143,8 @@ public final class BrainIpcClient {
         json.addProperty("loadedChunks", Math.max(0, loadedChunks));
         json.addProperty("heapUsedMb", Math.max(0L, heapUsedMb));
         json.addProperty("heapMaxMb", Math.max(0L, heapMaxMb));
+        json.addProperty("farmThrottled", Math.max(0, farmThrottled));
+        json.addProperty("villagersThrottled", Math.max(0, villagersThrottled));
 
         pendingTelemetry.set(json.toString());
     }

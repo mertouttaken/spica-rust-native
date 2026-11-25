@@ -192,8 +192,12 @@ fn print_stats(brain: &Arc<Mutex<BrainState>>) {
         s.tps, s.mspt, s.ewma_mspt
     );
     println!(
-        "  Dunya Yuk      : Oyuncu={} | Entity={} | Hibernated={} | Chunk={}",
-        s.players, s.entities, s.hibernated, s.loaded_chunks
+        "  Dunya Yuk      : Oyuncu={} | Entity={} | Chunk={}",
+        s.players, s.entities, s.loaded_chunks
+    );
+    println!(
+        "  AI & Farm Gov  : Hibernated={} | Farm Throttled={} | Villagers Throttled={}",
+        s.hibernated, s.farm_throttled, s.villagers_throttled
     );
     println!(
         "  Calisma Suresi : {} sn | Brain: {}",

@@ -166,6 +166,12 @@ pub fn render_prometheus_metrics(s: &BrainSnapshot) -> String {
          # HELP spica_hibernated_mobs Total hibernated mobs managed by SpicaRustNative.\n\
          # TYPE spica_hibernated_mobs gauge\n\
          spica_hibernated_mobs {}\n\
+         # HELP spica_farm_throttled_mobs Total dense farm mobs currently throttled by Rust Farm Governor.\n\
+         # TYPE spica_farm_throttled_mobs gauge\n\
+         spica_farm_throttled_mobs {}\n\
+         # HELP spica_villagers_throttled Total trading-hall/crowded villagers currently throttled by Rust Farm Governor.\n\
+         # TYPE spica_villagers_throttled gauge\n\
+         spica_villagers_throttled {}\n\
          # HELP spica_players Online player count.\n\
          # TYPE spica_players gauge\n\
          spica_players {}\n\
@@ -201,6 +207,8 @@ pub fn render_prometheus_metrics(s: &BrainSnapshot) -> String {
         s.tps,
         s.entities,
         s.hibernated,
+        s.farm_throttled,
+        s.villagers_throttled,
         s.players,
         s.state_code,
         s.host_cpu_pct,
@@ -229,6 +237,8 @@ mod tests {
             tps: 20.0,
             entities: 310,
             hibernated: 85,
+            farm_throttled: 42,
+            villagers_throttled: 18,
             players: 12,
             loaded_chunks: 1200,
             heap_used_mb: 2048,
@@ -241,6 +251,8 @@ mod tests {
             "spica_tps ",
             "spica_entities ",
             "spica_hibernated_mobs ",
+            "spica_farm_throttled_mobs 42",
+            "spica_villagers_throttled 18",
             "spica_players ",
             "spica_brain_state ",
             "spica_host_cpu_percent ",

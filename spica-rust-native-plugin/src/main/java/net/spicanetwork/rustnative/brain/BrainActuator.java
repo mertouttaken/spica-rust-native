@@ -3,6 +3,7 @@ package net.spicanetwork.rustnative.brain;
 import net.spicanetwork.rustnative.api.SpicaRustAPI;
 import net.spicanetwork.rustnative.nativebridge.EntityBatchArena;
 import net.spicanetwork.rustnative.optimizer.EntityLodOptimizer;
+import net.spicanetwork.rustnative.optimizer.FarmVillagerGovernor;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -40,6 +41,7 @@ public final class BrainActuator {
 
     private final SpicaRustAPI api;
     private final EntityLodOptimizer optimizer;
+    private final FarmVillagerGovernor farmGovernor;
     private final Logger logger;
     private final EntityBatchArena brainArena = new EntityBatchArena(4096, 64);
     private final List<Item> itemScratch = new ArrayList<>(1024);
@@ -79,11 +81,13 @@ public final class BrainActuator {
     public BrainActuator(
         SpicaRustAPI api,
         EntityLodOptimizer optimizer,
+        FarmVillagerGovernor farmGovernor,
         BrainIpcClient ipcClient,
         Logger logger
     ) {
         this.api = api;
         this.optimizer = optimizer;
+        this.farmGovernor = farmGovernor;
         this.ipcClient = ipcClient;
         this.logger = logger;
     }
@@ -136,6 +140,8 @@ public final class BrainActuator {
             loadedEntities += world.getEntities().size();
         }
         int hibernated = optimizer.getLastHibernatedMobs();
+        int farmThrottled = farmGovernor != null ? farmGovernor.getLastFarmThrottled() : 0;
+        int villagersThrottled = farmGovernor != null ? farmGovernor.getLastVillagersThrottled() : 0;
 
         Runtime runtime = Runtime.getRuntime();
         long heapUsedMb = Math.max(0L, (runtime.totalMemory() - runtime.freeMemory()) / (1024L * 1024L));
@@ -153,7 +159,8 @@ public final class BrainActuator {
         BrainDirective directive = null;
         if (ipcClient != null && ipcClient.isConnected()) {
             ipcClient.submitTelemetry(
-                mspt, tps, loadedEntities, hibernated, onlinePlayers, loadedChunks, heapUsedMb, heapMaxMb
+                mspt, tps, loadedEntities, hibernated, onlinePlayers, loadedChunks, heapUsedMb, heapMaxMb,
+                farmThrottled, villagersThrottled
             );
             BrainDirective ipcDir = ipcClient.getLatestDirective();
             long ipcAgeMs = System.currentTimeMillis() - ipcClient.getLastDirectiveTimestampMs();
@@ -470,6 +477,10 @@ public final class BrainActuator {
 
     public BrainDirective getLastDirective() {
         return lastDirective;
+    }
+
+    public int getCurrentBrainStateCode() {
+        return lastDirective != null ? lastDirective.stateCode() : BrainDirective.STATE_GREEN;
     }
 
     public long getTotalItemsMerged() {

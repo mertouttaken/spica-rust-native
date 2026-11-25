@@ -11,7 +11,7 @@ use jni::objects::{JByteBuffer, JClass};
 use jni::sys::{jfloat, jint, jlong, jstring};
 use jni::JNIEnv;
 
-use crate::{governor, heatmap, kernels};
+use crate::{farm_governor, governor, heatmap, kernels};
 
 /// Safely view a Java DirectByteBuffer as an immutable slice `&[T]`.
 unsafe fn buf_as_slice<'a, T>(
@@ -484,6 +484,86 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
         out_floats[3] = result.ewma_mspt;
 
         result.state_code
+    }))
+    .unwrap_or(-1)
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments, unused_mut)]
+pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_nativeEvaluateFarmThrottling<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    entity_count: jint,
+    xs_buf: JByteBuffer<'local>,
+    ys_buf: JByteBuffer<'local>,
+    zs_buf: JByteBuffer<'local>,
+    entity_flags_buf: JByteBuffer<'local>,
+    player_count: jint,
+    player_xs_buf: JByteBuffer<'local>,
+    player_ys_buf: JByteBuffer<'local>,
+    player_zs_buf: JByteBuffer<'local>,
+    crowd_radius: jfloat,
+    mild_crowd_threshold: jint,
+    severe_crowd_threshold: jint,
+    chunk_mob_limit: jint,
+    villager_wake_range: jfloat,
+    villager_crowd_threshold: jint,
+    brain_state_code: jint,
+    out_actions_buf: JByteBuffer<'local>,
+    out_neighbor_counts_buf: JByteBuffer<'local>,
+) -> jint {
+    if entity_count <= 0 {
+        return 0;
+    }
+    let n = entity_count as usize;
+    let p = player_count.max(0) as usize;
+
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Ok(xs) = buf_as_slice::<f32>(&mut env, &xs_buf, n) else { return -1; };
+        let Ok(ys) = buf_as_slice::<f32>(&mut env, &ys_buf, n) else { return -1; };
+        let Ok(zs) = buf_as_slice::<f32>(&mut env, &zs_buf, n) else { return -1; };
+        let Ok(entity_flags) = buf_as_slice::<i32>(&mut env, &entity_flags_buf, n) else {
+            return -1;
+        };
+
+        let (player_xs, player_ys, player_zs): (&[f32], &[f32], &[f32]) = if p == 0 {
+            (&[], &[], &[])
+        } else {
+            let Ok(pxs) = buf_as_slice::<f32>(&mut env, &player_xs_buf, p) else { return -1; };
+            let Ok(pys) = buf_as_slice::<f32>(&mut env, &player_ys_buf, p) else { return -1; };
+            let Ok(pzs) = buf_as_slice::<f32>(&mut env, &player_zs_buf, p) else { return -1; };
+            (pxs, pys, pzs)
+        };
+
+        let Ok(out_actions) = buf_as_mut_slice::<i32>(&mut env, &out_actions_buf, n) else {
+            return -1;
+        };
+        let Ok(out_neighbor_counts) =
+            buf_as_mut_slice::<i32>(&mut env, &out_neighbor_counts_buf, n)
+        else {
+            return -1;
+        };
+
+        crate::run_in_pool(|| {
+            farm_governor::evaluate_farm_throttling(
+                xs,
+                ys,
+                zs,
+                entity_flags,
+                player_xs,
+                player_ys,
+                player_zs,
+                crowd_radius,
+                mild_crowd_threshold,
+                severe_crowd_threshold,
+                chunk_mob_limit,
+                villager_wake_range,
+                villager_crowd_threshold,
+                brain_state_code,
+                out_actions,
+                out_neighbor_counts,
+            )
+        })
     }))
     .unwrap_or(-1)
 }

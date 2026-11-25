@@ -93,6 +93,10 @@ pub struct TelemetryPayload {
     pub entities: u32,
     #[serde(default)]
     pub hibernated: u32,
+    #[serde(rename = "farmThrottled", default)]
+    pub farm_throttled: u32,
+    #[serde(rename = "villagersThrottled", default)]
+    pub villagers_throttled: u32,
     #[serde(default)]
     pub players: u32,
     #[serde(rename = "loadedChunks", default)]
@@ -137,6 +141,8 @@ pub struct BrainSnapshot {
     pub tps: f64,
     pub entities: u32,
     pub hibernated: u32,
+    pub farm_throttled: u32,
+    pub villagers_throttled: u32,
     pub players: u32,
     pub loaded_chunks: u32,
     pub heap_used_mb: u64,
@@ -161,6 +167,8 @@ pub struct BrainState {
     pub tps: f64,
     pub entities: u32,
     pub hibernated: u32,
+    pub farm_throttled: u32,
+    pub villagers_throttled: u32,
     pub players: u32,
     pub loaded_chunks: u32,
     pub heap_used_mb: u64,
@@ -267,6 +275,8 @@ impl BrainState {
             tps: 20.0,
             entities: 0,
             hibernated: 0,
+            farm_throttled: 0,
+            villagers_throttled: 0,
             players: 0,
             loaded_chunks: 0,
             heap_used_mb: 0,
@@ -353,6 +363,8 @@ impl BrainState {
         self.tps = (clean_tps * 100.0).round() / 100.0;
         self.entities = telemetry.entities;
         self.hibernated = telemetry.hibernated;
+        self.farm_throttled = telemetry.farm_throttled;
+        self.villagers_throttled = telemetry.villagers_throttled;
         self.players = telemetry.players;
         self.loaded_chunks = telemetry.loaded_chunks;
         self.heap_used_mb = telemetry.heap_used_mb;
@@ -389,6 +401,8 @@ impl BrainState {
             tps: self.tps,
             entities: self.entities,
             hibernated: self.hibernated,
+            farm_throttled: self.farm_throttled,
+            villagers_throttled: self.villagers_throttled,
             players: self.players,
             loaded_chunks: self.loaded_chunks,
             heap_used_mb: self.heap_used_mb,
@@ -417,6 +431,8 @@ mod tests {
             tps,
             entities: 420,
             hibernated: 120,
+            farm_throttled: 0,
+            villagers_throttled: 0,
             players: 18,
             loaded_chunks: 1600,
             heap_used_mb: 2400,
@@ -520,5 +536,61 @@ mod tests {
         assert_eq!(json_val["itemMergeEnabled"], false);
         assert_eq!(json_val["itemMergeRadius"], 2.5);
         assert_eq!(json_val["reason"], "healthy");
+    }
+
+    #[test]
+    fn test_farm_and_villager_telemetry_roundtrip_and_defaults() {
+        let mut brain = BrainState::new(BrainConfig::default(), 4096, 16384);
+
+        // 1. Telemetry containing farmThrottled & villagersThrottled
+        let json_with_farm = r#"{
+            "type": "telemetry",
+            "mspt": 22.5,
+            "tps": 20.0,
+            "entities": 640,
+            "hibernated": 150,
+            "farmThrottled": 88,
+            "villagersThrottled": 24,
+            "players": 20,
+            "loadedChunks": 1800,
+            "heapUsedMb": 3072,
+            "heapMaxMb": 8192
+        }"#;
+        let payload: TelemetryPayload =
+            serde_json::from_str(json_with_farm).expect("deserialize telemetry with farm fields");
+        assert_eq!(payload.farm_throttled, 88);
+        assert_eq!(payload.villagers_throttled, 24);
+
+        let _ = brain.ingest_telemetry(&payload);
+        let snap = brain.snapshot();
+        assert_eq!(snap.farm_throttled, 88);
+        assert_eq!(snap.villagers_throttled, 24);
+
+        let snap_json = serde_json::to_value(&snap).expect("serialize snapshot");
+        assert_eq!(snap_json["farmThrottled"], 88);
+        assert_eq!(snap_json["villagersThrottled"], 24);
+
+        // 2. Legacy telemetry omitting farmThrottled & villagersThrottled defaults both to 0
+        let legacy_json = r#"{
+            "type": "telemetry",
+            "mspt": 19.0,
+            "tps": 20.0,
+            "entities": 300,
+            "hibernated": 40,
+            "players": 10,
+            "loadedChunks": 900,
+            "heapUsedMb": 1500,
+            "heapMaxMb": 8192
+        }"#;
+        let legacy_payload: TelemetryPayload =
+            serde_json::from_str(legacy_json).expect("deserialize legacy telemetry");
+        assert_eq!(legacy_payload.farm_throttled, 0);
+        assert_eq!(legacy_payload.villagers_throttled, 0);
+
+        let _ = brain.ingest_telemetry(&legacy_payload);
+        let legacy_snap_json =
+            serde_json::to_value(&brain.snapshot()).expect("serialize legacy snapshot");
+        assert_eq!(legacy_snap_json["farmThrottled"], 0);
+        assert_eq!(legacy_snap_json["villagersThrottled"], 0);
     }
 }

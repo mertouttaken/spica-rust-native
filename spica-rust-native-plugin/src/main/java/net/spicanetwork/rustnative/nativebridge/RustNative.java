@@ -14,6 +14,18 @@ public final class RustNative {
     public static final int LOD_REDUCED = 1;
     public static final int LOD_HIBERNATE = 2;
 
+    // Farm & Villager Governor action bitmask values
+    public static final int ACTION_NORMAL = 0;
+    public static final int ACTION_DISABLE_COLLISION = 1;
+    public static final int ACTION_THROTTLE_AI = 2;
+    public static final int ACTION_FARM_SUPPRESS = 3;
+
+    // Farm & Villager Governor per-entity input flags
+    public static final int FLAG_PROTECTED = 1;
+    public static final int FLAG_VILLAGER = 2;
+    public static final int FLAG_TRAPPED_BOX = 4;
+    public static final int FLAG_RECENT_INTERACT = 8;
+
     private RustNative() {
     }
 
@@ -156,5 +168,32 @@ public final class RustNative {
         int maxSimDist,
         ByteBuffer outIntState,
         ByteBuffer outFloatParams
+    );
+
+    /**
+     * Spatial-Hash Mob Farm & Trading-Hall Villager throttling evaluator.
+     *
+     * Outputs per-entity action bitmasks ({@code ACTION_*}) into {@code outActions}
+     * and neighbor counts into {@code outNeighborCounts}.
+     */
+    public static native int nativeEvaluateFarmThrottling(
+        int entityCount,
+        ByteBuffer xs,
+        ByteBuffer ys,
+        ByteBuffer zs,
+        ByteBuffer entityFlags,
+        int playerCount,
+        ByteBuffer playerXs,
+        ByteBuffer playerYs,
+        ByteBuffer playerZs,
+        float crowdRadius,
+        int mildCrowdThreshold,
+        int severeCrowdThreshold,
+        int chunkMobLimit,
+        float villagerWakeRange,
+        int villagerCrowdThreshold,
+        int brainStateCode,
+        ByteBuffer outActions,
+        ByteBuffer outNeighborCounts
     );
 }

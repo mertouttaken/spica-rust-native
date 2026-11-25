@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 /**
  * Live Purpur 1.21.4 Entity AI LOD Optimizer & Mob-Cluster Hotspot Scanner.
@@ -36,6 +37,8 @@ public final class EntityLodOptimizer {
     private final List<Mob> mobScratch = new ArrayList<>(4096);
     private final Set<UUID> hibernatedByUs = new HashSet<>();
     private final Set<EntityType> excludedTypes = EnumSet.noneOf(EntityType.class);
+
+    private Predicate<UUID> externalAiManagedPredicate;
 
     private boolean enabled = true;
     private float baseFullAiRange = 32.0f;
@@ -54,6 +57,18 @@ public final class EntityLodOptimizer {
 
     public EntityLodOptimizer(SpicaRustAPI api) {
         this.api = api;
+    }
+
+    /**
+     * Connects an external AI-suppression check (e.g. {@link FarmVillagerGovernor#isMobManagedByFarmGovernor(UUID)})
+     * so waking a nearby mob does not override active mob-farm or trading-hall throttling.
+     */
+    public void setExternalAiManagedPredicate(Predicate<UUID> externalAiManagedPredicate) {
+        this.externalAiManagedPredicate = externalAiManagedPredicate;
+    }
+
+    public boolean isHibernatedByUs(UUID id) {
+        return hibernatedByUs.contains(id);
     }
 
     public void reloadConfig(FileConfiguration cfg) {
@@ -146,11 +161,17 @@ public final class EntityLodOptimizer {
                     if (mob.isAware()) {
                         mob.setAware(false);
                         hibernatedByUs.add(id);
+                    } else if (externalAiManagedPredicate != null && externalAiManagedPredicate.test(id)) {
+                        hibernatedByUs.add(id);
                     }
                     hibernatedCount++;
                 } else {
-                    if (hibernatedByUs.remove(id) && !mob.isAware()) {
-                        mob.setAware(true);
+                    if (hibernatedByUs.remove(id)) {
+                        boolean managedExternally = externalAiManagedPredicate != null
+                            && externalAiManagedPredicate.test(id);
+                        if (!managedExternally && !mob.isAware()) {
+                            mob.setAware(true);
+                        }
                     }
                 }
             }

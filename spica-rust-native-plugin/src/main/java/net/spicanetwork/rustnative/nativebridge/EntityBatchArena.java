@@ -27,11 +27,13 @@ public final class EntityBatchArena {
     public ByteBuffer vxBuf, vyBuf, vzBuf;
     public ByteBuffer radiusBuf;
     public ByteBuffer typeIdBuf, amountBuf;
+    public ByteBuffer flagsBuf;
 
     public FloatBuffer x, y, z;
     public FloatBuffer vx, vy, vz;
     public FloatBuffer radius;
     public IntBuffer typeId, amount;
+    public IntBuffer flags;
 
     // Target/Player SoA inputs
     public ByteBuffer targetXBuf, targetYBuf, targetZBuf;
@@ -110,6 +112,13 @@ public final class EntityBatchArena {
         targetZ.put(index, pz);
     }
 
+    public void setEntityPositionAndFlags(int index, float px, float py, float pz, int entityFlags) {
+        x.put(index, px);
+        y.put(index, py);
+        z.put(index, pz);
+        flags.put(index, entityFlags);
+    }
+
     public void setItem(int index, float px, float py, float pz, int itemTypeId, int stackAmount) {
         x.put(index, px);
         y.put(index, py);
@@ -132,6 +141,7 @@ public final class EntityBatchArena {
         this.radiusBuf = allocNative(floatBytes);
         this.typeIdBuf = allocNative(intBytes);
         this.amountBuf = allocNative(intBytes);
+        this.flagsBuf = allocNative(intBytes);
 
         this.outXBuf = allocNative(floatBytes);
         this.outYBuf = allocNative(floatBytes);
@@ -149,6 +159,7 @@ public final class EntityBatchArena {
         this.radius = radiusBuf.asFloatBuffer();
         this.typeId = typeIdBuf.asIntBuffer();
         this.amount = amountBuf.asIntBuffer();
+        this.flags = flagsBuf.asIntBuffer();
 
         this.outX = outXBuf.asFloatBuffer();
         this.outY = outYBuf.asFloatBuffer();

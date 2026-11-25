@@ -313,6 +313,63 @@ public final class SpicaRustAPI {
         );
     }
 
+    /**
+     * Runs Rust Spatial-Hash Mob Farm & Trading-Hall Villager throttling evaluation.
+     *
+     * Inputs in {@code arena}: {@code x, y, z, flags} (mobs) and {@code targetX, targetY, targetZ} (players).
+     * Outputs in {@code arena}:
+     * - {@code outIntA}: action bitmask ({@link RustNative#ACTION_NORMAL}, {@link RustNative#ACTION_DISABLE_COLLISION},
+     *   {@link RustNative#ACTION_THROTTLE_AI}, {@link RustNative#ACTION_FARM_SUPPRESS})
+     * - {@code outIntB}: spatial neighbor counts within {@code crowdRadius}
+     */
+    public int evaluateFarmThrottling(
+        EntityBatchArena arena,
+        int entityCount,
+        int playerCount,
+        float crowdRadius,
+        int mildCrowdThreshold,
+        int severeCrowdThreshold,
+        int chunkMobLimit,
+        float villagerWakeRange,
+        int villagerCrowdThreshold,
+        int brainStateCode
+    ) {
+        ensureLoaded();
+        if (entityCount <= 0) {
+            return 0;
+        }
+        int clampedEntities = Math.min(entityCount, arena.getEntityCapacity());
+        int clampedPlayers = Math.clamp(playerCount, 0, arena.getTargetCapacity());
+        float safeCrowdRadius = Float.isFinite(crowdRadius) && crowdRadius > 0.25f ? crowdRadius : 3.5f;
+        int safeMild = Math.max(1, mildCrowdThreshold);
+        int safeSevere = Math.max(safeMild, severeCrowdThreshold);
+        int safeChunkLimit = Math.max(4, chunkMobLimit);
+        float safeWakeRange = Float.isFinite(villagerWakeRange) && villagerWakeRange >= 0f ? villagerWakeRange : 8.0f;
+        int safeVillagerCrowd = Math.max(1, villagerCrowdThreshold);
+        int safeState = Math.clamp(brainStateCode, BrainDirective.STATE_GREEN, BrainDirective.STATE_EMERGENCY);
+
+        return RustNative.nativeEvaluateFarmThrottling(
+            clampedEntities,
+            arena.xBuf,
+            arena.yBuf,
+            arena.zBuf,
+            arena.flagsBuf,
+            clampedPlayers,
+            arena.targetXBuf,
+            arena.targetYBuf,
+            arena.targetZBuf,
+            safeCrowdRadius,
+            safeMild,
+            safeSevere,
+            safeChunkLimit,
+            safeWakeRange,
+            safeVillagerCrowd,
+            safeState,
+            arena.outIntABuf,
+            arena.outIntBBuf
+        );
+    }
+
     private void ensureLoaded() {
         if (!NativeLoader.isLoaded()) {
             throw new IllegalStateException("Spica Rust native kutuphanesi yuklu degil.");

@@ -1,4 +1,4 @@
-# SpicaRustNative 2.0.0 (Purpur 1.21.4 Core + Rust Brain) Yapilandirmasi
+# SpicaRustNative 2.1.0 (Purpur 1.21.4 Core + Rust Brain + Farm & Villager Governor) Yapilandirmasi
 native:
   # 0 = Otomatik (max(2, cekirdek/2), en fazla 8). Main thread + Netty + GC icin bosluk birakir.
   worker-threads: 0
@@ -51,3 +51,41 @@ optimizer:
     - WARDEN
     - ELDER_GUARDIAN
     - PLAYER
+
+farm-governor:
+  # Rust destekli canli Mob Farm & Koylu (Trading Hall) Governor motorunu aktif eder.
+  enabled: true
+  # Kac tick'te bir farm yogunlugu ve koylu durumu Rust ile degerlendirilsin (20 tick = 1 saniye).
+  interval-ticks: 20
+  # Komsu mob yogunlugu hesaplama yaricapi (blok).
+  crowd-radius: 3.5
+  # Bu komsu sayisina ulasan moblarda carpismayi (pushing) kapatir (setCollidable(false)).
+  mild-crowd-threshold: 8
+  # Bu komsu sayisina ulasan farm moblarinda carpisma + agir AI'yi baskilar (setAware(false)).
+  severe-crowd-threshold: 14
+  # Ayni chunk icinde bu siniri asan fazla farm moblarini baskilar.
+  chunk-mob-limit: 48
+  villager-optimization:
+    # Trading Hall ve sikisik koylulerde guvenli AI baskilama + anlik uyanma ozelligini aktif eder.
+    enabled: true
+    # Oyuncu bu mesafeye yaklastiginda koylu aninda uyanir (blok).
+    wake-range: 8.0
+    # Bu sayida koylu bir aradayken veya 1x1 hucreye hapsedilmisse optimize edilir.
+    crowd-threshold: 4
+    # Oyuncu bir moba/koyluye sag tikladiginda kac saniye boyunca uyanik kalsin (ticaret/ureme/kirkma).
+    interact-grace-seconds: 15
+    # Koylulerin meslek blogundan stok yenilemesi (restock) icin periyodik uyanma araligi (saniye).
+    restock-pulse-interval-seconds: 120
+    # Her restock pulse sirasinda koylulerin kac saniye uyanik kalacagi.
+    restock-pulse-duration-seconds: 6
+  # Isim etiketli (Nametag) moblara dokunma.
+  skip-named-mobs: true
+  # Evcil (Tamed) hayvanlara dokunma.
+  skip-tamed-mobs: true
+  # Farm Governor tarafindan asla baskilanmayacak mob turleri.
+  # Not: villager-optimization.enabled=true iken VILLAGER bilerek burada degildir (FLAG_VILLAGER ile guvenli yonetilir).
+  excluded-types:
+    - ENDER_DRAGON
+    - WITHER
+    - WARDEN
+    - ELDER_GUARDIAN

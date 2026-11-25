@@ -3,7 +3,9 @@
 
 use std::time::Instant;
 
-use spica_rust_native::{governor, heatmap, init_thread_pool, kernels, run_in_pool};
+use spica_rust_native::{
+    farm_governor, governor, heatmap, init_thread_pool, kernels, run_in_pool,
+};
 
 fn lcg_next(state: &mut u64) -> f32 {
     *state = state
@@ -232,7 +234,56 @@ fn main() {
         ewma
     );
 
-    let total_ms = dt_coll + dt_ai + dt_boids + dt_heatmap + dt_merge + dt_gov_ms;
+    // 7) Farm & Villager Governor
+    let mut entity_flags = Vec::with_capacity(entities);
+    for i in 0..entities {
+        let flag = if i % 20 == 0 {
+            farm_governor::FLAG_PROTECTED
+        } else if i % 10 == 1 {
+            farm_governor::FLAG_VILLAGER | farm_governor::FLAG_TRAPPED_BOX
+        } else if i % 10 == 2 {
+            farm_governor::FLAG_VILLAGER
+        } else if i % 50 == 3 {
+            farm_governor::FLAG_RECENT_INTERACT
+        } else {
+            0
+        };
+        entity_flags.push(flag);
+    }
+    let mut farm_actions = vec![0i32; entities];
+    let mut farm_neighbors = vec![0i32; entities];
+
+    let t6 = Instant::now();
+    let mut throttled_count = 0i32;
+    for _ in 0..iterations {
+        throttled_count = run_in_pool(|| {
+            farm_governor::evaluate_farm_throttling(
+                &xs,
+                &ys,
+                &zs,
+                &entity_flags,
+                &pxs,
+                &pys,
+                &pzs,
+                3.0,
+                6,
+                14,
+                48,
+                12.0,
+                4,
+                last_state,
+                &mut farm_actions,
+                &mut farm_neighbors,
+            )
+        });
+    }
+    let dt_farm = t6.elapsed().as_secs_f64() * 1000.0 / (iterations as f64);
+    println!(
+        "[7] Farm & Villager Governor: {:.3} ms/tick (throttled: {}/{})",
+        dt_farm, throttled_count, entities
+    );
+
+    let total_ms = dt_coll + dt_ai + dt_boids + dt_heatmap + dt_merge + dt_gov_ms + dt_farm;
     println!(
         "\nTotal combined budget: {:.3} ms / 50.000 ms tick ({:.2}% of 1 tick)",
         total_ms,

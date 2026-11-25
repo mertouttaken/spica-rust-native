@@ -5,6 +5,7 @@
 //! - Pure C ABI (`extern "C"`) for Java 22+ Panama FFM or native tooling.
 
 pub mod c_abi;
+pub mod farm_governor;
 pub mod governor;
 pub mod heatmap;
 pub mod jni_bridge;

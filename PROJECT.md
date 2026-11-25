@@ -89,6 +89,8 @@ spica-rust-native/
 - [x] $O(N)$ Spatial Hash çarpışma, AI hedef/LOD, Boids, Chunk Heatmap ve Item Merge planlayıcı
 - [x] Rust başlatıcı + ZGC/Aikar profilleyici + Brain IPC + HTTP `/status` & `/metrics` (`spica-launcher`)
 - [x] Purpur 1.21.4 A/B performans testi ve doğrulama
+- [x] v2.1.0 Canlı Mob-Farm & Köylü (Villager) Frenleme Motoru (otomatik çarpışma/AI kısma, oyuncu etkileşiminde anlık uyanma, periyodik restock nabzı, `/rustbridge farms` + Prometheus metrikleri)
+- [ ] Gömülü Canlı Web Dashboard (`127.0.0.1:9120/` grafikli arayüz, 0 JVM yükü)
 - [ ] Linux x86_64 / aarch64 CI (GitHub Actions) ile otomatik çift platform `.jar` (hem `.dll` hem `.so` gömülü)
 - [ ] Web panel / Grafana hazır Prometheus dashboard şablonu
 - [ ] Özel chunk/şematik toplu blok hesaplayıcı ve Rust tabanlı anti-bot/paket ön filtresi

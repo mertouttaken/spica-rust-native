@@ -1,4 +1,4 @@
-# SpicaRustNative v2.0 — Purpur 1.21.4 Core + Rust Brain
+# SpicaRustNative v2.1 — Purpur 1.21.4 Core + Rust Brain
 
 > **Execution Core:** Purpur / Paper 1.21.4 (100% compatible with existing Bukkit/Paper/Purpur plugins)  
 > **Brain & Orchestrator:** Rust (`spica-launcher` + `spica-native`)
@@ -23,16 +23,16 @@
 ┌──────────────────────────────────▼─────────────────────────────────────┐
 │  2) SpicaRustNative Plugin (Purpur 1.21.4 Execution Body)              │
 │  • Safely actuates Rust Brain directives onto live worlds:             │
-│    dynamic AI LOD, cooldown-guarded view/sim distance, NBT-safe item   │
-│    stack merging, and full restoration on disable/reload               │
+│    dynamic AI LOD, live Mob-Farm & Villager Trading-Hall Governor,     │
+│    cooldown-guarded view/sim distance, NBT-safe item stack merging     │
 │  • Seamless fallback to in-process Rust Governor if run standalone     │
 └──────────────────────────────────┬─────────────────────────────────────┘
                                    │ Zero-Copy DirectByteBuffer (0 GC)
 ┌──────────────────────────────────▼─────────────────────────────────────┐
 │  3) spica-native (.dll / .so — In-Process Rust Compute Engine)         │
 │  • Flat CSR O(N) Spatial Hash Grid + Rayon work-stealing pool          │
-│  • Collision/density, AI targeting + LOD, Boids steering, O(N) Chunk   │
-│    Heatmap, Item-Merge planner, radius queries, in-process Governor    │
+│  • Collision/density, AI targeting + LOD, Farm & Villager Governor,    │
+│    Boids steering, O(N) Chunk Heatmap, Item-Merge planner, Governor    │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -75,9 +75,10 @@ Measured directly inside the running Purpur 1.21.4 JVM (**5,000 entities, 100 pl
 - **Live O(N) Chunk Heatmap (`/rustbridge chunks world` — 1,033 entities):** `0.487 ms` in Rust
 - **Standalone Rust Engine (`cargo run --release -p spica-rust-native --bin bench`):**
   - Chunk Density Heatmap (5,000 entities): `0.249 ms/tick`
-  - Item Merge Planner (2,000 items → 1,568 pairs): `0.852 ms/tick`
-  - Adaptive MSPT Governor evaluation: `13.4 ns/eval`
-- **Unit Test Suite:** `20/20` Rust unit tests passing (`spica-launcher`: 10/10, `spica-rust-native`: 10/10)
+  - Item Merge Planner (2,000 items → 1,568 pairs): `0.702 ms/tick`
+  - Adaptive MSPT Governor evaluation: `5.5 ns/eval`
+  - Farm & Villager Governor (5,000 entities × 100 players): `3.685 ms` (`~0.18 ms/tick` amortized at 1s interval)
+- **Unit Test Suite:** `26/26` Rust unit tests passing (`spica-launcher`: 11/11, `spica-rust-native`: 15/15)
 
 ---
 
@@ -143,13 +144,14 @@ docker build -f Dockerfile.linux --output type=local,dest=./dist/linux-x86_64 .
 
 ### Zero-JVM-Overhead HTTP Endpoints
 - `GET http://127.0.0.1:9120/status` — Live JSON status snapshot
-- `GET http://127.0.0.1:9120/metrics` — Prometheus exposition metrics (`spica_mspt`, `spica_ewma_mspt`, `spica_tps`, `spica_entities`, `spica_hibernated_mobs`, `spica_brain_state`, `spica_host_cpu_percent`, etc.)
+- `GET http://127.0.0.1:9120/metrics` — Prometheus exposition metrics (`spica_mspt`, `spica_ewma_mspt`, `spica_tps`, `spica_entities`, `spica_hibernated_mobs`, `spica_farm_throttled_mobs`, `spica_villagers_throttled`, `spica_brain_state`, `spica_host_cpu_percent`, etc.)
 
 ### In-Game Purpur Commands (`/rustbridge`)
 
 | Command | Description |
 | :--- | :--- |
 | `/rustbridge brain` | Displays Brain mode (`LAUNCHER IPC` / `IN-PROCESS RUST`), health state, EWMA MSPT, live view/sim distance, dynamic AI ranges, and total Rust-merged items. |
+| `/rustbridge farms` | Displays live Mob-Farm & Villager Governor stats: throttled farm mobs, collision-disabled mobs, throttled trading-hall villagers, restock pulse countdown, and active thresholds. |
 | `/rustbridge chunks [world]` | Runs the Rust $O(N)$ Chunk Heatmap and lists the Top 8 densest/most crowded chunks with chunk & block coordinates. |
 | `/rustbridge status` | Shows native engine info, Rayon worker count, and AI LOD optimizer stats. |
 | `/rustbridge scan [world]` | Scans all live mobs with Rust Spatial Hash to locate entity-cramming / mob-farm hotspots. |
