@@ -12,8 +12,8 @@ use jni::sys::{jfloat, jint, jlong, jstring};
 use jni::JNIEnv;
 
 use crate::{
-    farm_governor, flowfield, governor, heatmap, kernels, mob_tracker, noise, redstone_guard,
-    surge_guard,
+    block_diff, farm_governor, flowfield, governor, heatmap, kernels, mob_tracker, noise,
+    redstone_guard, surge_guard,
 };
 
 /// Safely view a Java DirectByteBuffer as an immutable slice `&[T]`.
@@ -960,6 +960,70 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
                 out_throttle_ratio,
                 out_top_indices,
             )
+        })
+    }))
+    .unwrap_or(-1)
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments, unused_mut)]
+pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_nativeComputeBlockDiff<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    width: jint,
+    height: jint,
+    depth: jint,
+    current_blocks_buf: JByteBuffer<'local>,
+    target_blocks_buf: JByteBuffer<'local>,
+    max_diffs: jint,
+    out_rel_x_buf: JByteBuffer<'local>,
+    out_rel_y_buf: JByteBuffer<'local>,
+    out_rel_z_buf: JByteBuffer<'local>,
+    out_new_block_id_buf: JByteBuffer<'local>,
+) -> jint {
+    if width <= 0 || height <= 0 || depth <= 0 {
+        return 0;
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let d = depth as usize;
+    let Some(total) = w.checked_mul(d).and_then(|p| p.checked_mul(h)) else {
+        return -1;
+    };
+    if total > block_diff::MAX_VOLUME_BLOCKS {
+        return -1;
+    }
+    let max_d = max_diffs.max(0) as usize;
+
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Ok(cur) = buf_as_slice::<i32>(&mut env, &current_blocks_buf, total) else {
+            return -1;
+        };
+        let Ok(tgt) = buf_as_slice::<i32>(&mut env, &target_blocks_buf, total) else {
+            return -1;
+        };
+
+        let (out_x, out_y, out_z, out_id): (&mut [i32], &mut [i32], &mut [i32], &mut [i32]) =
+            if max_d == 0 {
+                (&mut [], &mut [], &mut [], &mut [])
+            } else {
+                let Ok(ox) = buf_as_mut_slice::<i32>(&mut env, &out_rel_x_buf, max_d) else {
+                    return -1;
+                };
+                let Ok(oy) = buf_as_mut_slice::<i32>(&mut env, &out_rel_y_buf, max_d) else {
+                    return -1;
+                };
+                let Ok(oz) = buf_as_mut_slice::<i32>(&mut env, &out_rel_z_buf, max_d) else {
+                    return -1;
+                };
+                let Ok(oi) = buf_as_mut_slice::<i32>(&mut env, &out_new_block_id_buf, max_d) else {
+                    return -1;
+                };
+                (ox, oy, oz, oi)
+            };
+
+        crate::run_in_pool(|| {
+            block_diff::compute_block_diff(w, h, d, cur, tgt, out_x, out_y, out_z, out_id)
         })
     }))
     .unwrap_or(-1)

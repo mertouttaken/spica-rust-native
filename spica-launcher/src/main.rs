@@ -1,3 +1,4 @@
+mod backup;
 mod brain;
 mod config;
 mod ipc;
@@ -88,6 +89,7 @@ fn print_usage() {
     println!("Calisma Sirasinda Dahili Konsol Komutlari:");
     println!("  :brain            Canli Rust Brain durumu, EWMA MSPT ve aktif direktif");
     println!("  :stats            Host CPU/RAM, JVM Heap, TPS ve varlik ozeti");
+    println!("  :backup           Zero-JVM-Overhead Rust dunya yedegi alir (save-off -> tar.gz -> save-on)");
     println!("  :restart          Purpur'u temiz durdurur ve yeniden baslatir");
     println!("  :stop             Purpur'u durdurur ve launcher'dan cikar");
     println!("  :help             Dahili komut listesini gosterir");
@@ -282,7 +284,7 @@ async fn main() -> ExitCode {
 
     let host_mon_handle = supervisor::spawn_host_monitor(Arc::clone(&brain), shutdown_rx);
 
-    println!("[SpicaSupervisor] Hazir! Dahili komutlar: :brain | :stats | :restart | :stop | :help");
+    println!("[SpicaSupervisor] Hazir! Dahili komutlar: :brain | :stats | :backup | :restart | :stop | :help");
 
     let run_result = supervisor::run_supervisor(&cfg, &plan, brain, shutdown_tx.clone()).await;
 

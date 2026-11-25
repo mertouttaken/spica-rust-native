@@ -1,3 +1,4 @@
+use crate::backup::{create_world_backup, BackupOutcome};
 use crate::brain::BrainState;
 use crate::config::LauncherConfig;
 use crate::preflight::JvmPlan;
@@ -8,7 +9,7 @@ use std::time::{Duration, Instant};
 use sysinfo::System;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 const GRACEFUL_STOP_TIMEOUT_SECS: u64 = 30;
@@ -75,7 +76,10 @@ fn spawn_stdin_reader() -> mpsc::UnboundedReceiver<String> {
                 match locked.read_line(&mut line) {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
-                        let cleaned = line.trim_end_matches(&['\r', '\n'][..]).to_string();
+                        let cleaned = line
+                            .trim_start_matches('\u{FEFF}')
+                            .trim_end_matches(&['\r', '\n'][..])
+                            .to_string();
                         if tx.send(cleaned).is_err() {
                             break;
                         }
@@ -125,6 +129,7 @@ fn print_supervisor_help() {
     println!("================ Spica Supervisor Komutlari ================");
     println!("  :brain    -> Canli Rust Brain durumu, EWMA MSPT ve direktif");
     println!("  :stats    -> Host CPU/RAM, JVM Heap, TPS ve varlik ozeti");
+    println!("  :backup   -> Zero-JVM-Overhead Rust dunya yedegi (.tar.gz)");
     println!("  :restart  -> Purpur'a 'stop' gonderir ve temiz yeniden baslatir");
     println!("  :stop     -> Purpur'a 'stop' gonderir ve launcher'dan cikar");
     println!("  :help     -> Bu yardim mesajini gosterir");
@@ -212,6 +217,10 @@ fn print_stats(brain: &Arc<Mutex<BrainState>>) {
         s.redstone_chunks_throttled, s.redstone_ops_blocked
     );
     println!(
+        "  World Backups  : Completed={} | Last={} ms ({:.2} MB)",
+        s.backups_completed, s.last_backup_duration_ms, s.last_backup_size_mb
+    );
+    println!(
         "  Calisma Suresi : {} sn | Brain: {}",
         s.uptime_secs, s.state
     );
@@ -267,12 +276,87 @@ pub async fn run_supervisor(
         let started_at = Instant::now();
         let mut requested_action = SupervisorAction::None;
         let mut force_kill_deadline: Option<tokio::time::Instant> = None;
+        let mut backup_rx: Option<oneshot::Receiver<Result<BackupOutcome, String>>> = None;
+        let mut scheduled_backup_timer = if cfg.backup.enabled {
+            let interval = Duration::from_secs(cfg.backup.interval_minutes.max(1) * 60);
+            let mut t = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            Some(t)
+        } else {
+            None
+        };
 
         let exit_result = loop {
             let current_deadline = force_kill_deadline;
             tokio::select! {
                 status = child.wait() => {
                     break status;
+                }
+                backup_res = async {
+                    match backup_rx.as_mut() {
+                        Some(rx) => rx.await,
+                        None => std::future::pending().await,
+                    }
+                }, if backup_rx.is_some() => {
+                    backup_rx = None;
+                    // Guarantee save-on is ALWAYS restored after backup finishes or fails
+                    send_to_child(&mut child_stdin, "save-on").await;
+                    match backup_res {
+                        Ok(Ok(outcome)) => {
+                            let size_mb = outcome.size_bytes as f64 / (1024.0 * 1024.0);
+                            match brain.lock() {
+                                Ok(mut guard) => guard.record_backup(outcome.duration_ms, outcome.size_bytes),
+                                Err(poisoned) => poisoned
+                                    .into_inner()
+                                    .record_backup(outcome.duration_ms, outcome.size_bytes),
+                            }
+                            println!(
+                                "[SpicaBackup] Tamamlandi: {} ({:.2} MB | {} dosya | {} ms | dunyalar={:?} | silinen eski={})",
+                                outcome.archive_path.display(),
+                                size_mb,
+                                outcome.files_archived,
+                                outcome.duration_ms,
+                                outcome.worlds_included,
+                                outcome.rotated_deleted
+                            );
+                        }
+                        Ok(Err(err)) => {
+                            eprintln!("[SpicaBackup] HATA (save-on geri acildi): {}", err);
+                        }
+                        Err(_) => {
+                            eprintln!("[SpicaBackup] HATA: Yedekleme gorevi beklenmedik sekilde iptal oldu (save-on geri acildi).");
+                        }
+                    }
+                }
+                _ = async {
+                    match scheduled_backup_timer.as_mut() {
+                        Some(timer) => {
+                            timer.tick().await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                }, if scheduled_backup_timer.is_some() && backup_rx.is_none() && requested_action == SupervisorAction::None => {
+                    println!(
+                        "[SpicaBackup] Zamanlanmis dunya yedegi baslatiliyor (save-off -> save-all flush -> Rust tar.gz)..."
+                    );
+                    send_to_child(&mut child_stdin, "save-off").await;
+                    send_to_child(&mut child_stdin, "save-all flush").await;
+                    let (tx, rx) = oneshot::channel();
+                    let work_dir_clone = plan.work_dir.clone();
+                    let backup_cfg_clone = cfg.backup.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(backup_cfg_clone.flush_wait_ms)).await;
+                        let res = match tokio::task::spawn_blocking(move || {
+                            create_world_backup(&work_dir_clone, &backup_cfg_clone)
+                        })
+                        .await
+                        {
+                            Ok(r) => r,
+                            Err(e) => Err(format!("Yedekleme thread hatasi: {}", e)),
+                        };
+                        let _ = tx.send(res);
+                    });
+                    backup_rx = Some(rx);
                 }
                 maybe_line = stdin_rx.recv(), if stdin_open => {
                     match maybe_line {
@@ -286,7 +370,40 @@ pub async fn run_supervisor(
                                     ":brain" => print_brain_status(&brain),
                                     ":stats" => print_stats(&brain),
                                     ":help" => print_supervisor_help(),
+                                    ":backup" => {
+                                        if backup_rx.is_some() {
+                                            println!("[SpicaBackup] Zaten devam eden bir yedekleme var.");
+                                        } else if requested_action != SupervisorAction::None {
+                                            println!("[SpicaBackup] Sunucu kapanma/yeniden baslatma asamasinda, yedekleme baslatilmadi.");
+                                        } else {
+                                            println!(
+                                                "[SpicaBackup] Manuel dunya yedegi baslatiliyor (save-off -> save-all flush -> Rust tar.gz)..."
+                                            );
+                                            send_to_child(&mut child_stdin, "save-off").await;
+                                            send_to_child(&mut child_stdin, "save-all flush").await;
+                                            let (tx, rx) = oneshot::channel();
+                                            let work_dir_clone = plan.work_dir.clone();
+                                            let backup_cfg_clone = cfg.backup.clone();
+                                            tokio::spawn(async move {
+                                                tokio::time::sleep(Duration::from_millis(backup_cfg_clone.flush_wait_ms)).await;
+                                                let res = match tokio::task::spawn_blocking(move || {
+                                                    create_world_backup(&work_dir_clone, &backup_cfg_clone)
+                                                })
+                                                .await
+                                                {
+                                                    Ok(r) => r,
+                                                    Err(e) => Err(format!("Yedekleme thread hatasi: {}", e)),
+                                                };
+                                                let _ = tx.send(res);
+                                            });
+                                            backup_rx = Some(rx);
+                                        }
+                                    }
                                     ":restart" => {
+                                        if backup_rx.is_some() {
+                                            send_to_child(&mut child_stdin, "save-on").await;
+                                            backup_rx = None;
+                                        }
                                         requested_action = SupervisorAction::Restart;
                                         println!("[SpicaSupervisor] Purpur guvenli yeniden baslatiliyor ('stop' gonderiliyor)...");
                                         send_to_child(&mut child_stdin, "stop").await;
@@ -296,6 +413,10 @@ pub async fn run_supervisor(
                                         );
                                     }
                                     ":stop" => {
+                                        if backup_rx.is_some() {
+                                            send_to_child(&mut child_stdin, "save-on").await;
+                                            backup_rx = None;
+                                        }
                                         requested_action = SupervisorAction::Stop;
                                         println!("[SpicaSupervisor] Purpur ve Spica Launcher durduruluyor ('stop' gonderiliyor)...");
                                         send_to_child(&mut child_stdin, "stop").await;
@@ -306,7 +427,7 @@ pub async fn run_supervisor(
                                     }
                                     _ => {
                                         println!(
-                                            "[SpicaSupervisor] Bilinmeyen komut '{}'. Kullanilabilir: :brain, :stats, :restart, :stop, :help",
+                                            "[SpicaSupervisor] Bilinmeyen komut '{}'. Kullanilabilir: :brain, :stats, :backup, :restart, :stop, :help",
                                             trimmed
                                         );
                                     }

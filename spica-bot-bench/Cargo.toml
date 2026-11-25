@@ -1,0 +1,9 @@
+[package]
+name = "spica-bot-bench"
+version = "2.6.0"
+edition = "2021"
+description = "Async Minecraft 1.21.4 (Protocol 769) Offline-Mode Bot Load & Mob-Tracking Stress Tester for SpicaRustNative"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+flate2 = "1"

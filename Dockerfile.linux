@@ -1,4 +1,4 @@
-# Production Linux x86_64 build (spica-launcher + libspica_rust_native.so + SpicaRustNative-2.5.0.jar)
+# Production Linux x86_64 build (spica-launcher + spica-bot-bench + libspica_rust_native.so + SpicaRustNative-2.6.0.jar)
 # Kullanim:
 #   docker build -f Dockerfile.linux --output type=local,dest=./dist/linux-x86_64 .
 
@@ -7,6 +7,7 @@ WORKDIR /build
 COPY Cargo.toml ./
 COPY spica-native ./spica-native
 COPY spica-launcher ./spica-launcher
+COPY spica-bot-bench ./spica-bot-bench
 ENV RUSTFLAGS="-C target-cpu=x86-64-v3"
 RUN cargo test --workspace --release && cargo build --workspace --release
 
@@ -19,6 +20,7 @@ COPY --from=rust-builder /build/target/release/libspica_rust_native.so \
 RUN mvn -B clean package
 
 FROM scratch AS export
-COPY --from=java-builder /build/plugin/target/SpicaRustNative-2.5.0.jar /SpicaRustNative-2.5.0.jar
+COPY --from=java-builder /build/plugin/target/SpicaRustNative-2.6.0.jar /SpicaRustNative-2.6.0.jar
 COPY --from=rust-builder /build/target/release/spica-launcher /spica-launcher
+COPY --from=rust-builder /build/target/release/spica-bot-bench /spica-bot-bench
 COPY --from=rust-builder /build/target/release/libspica_rust_native.so /libspica_rust_native.so

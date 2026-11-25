@@ -65,15 +65,26 @@ public final class BridgeBenchmark {
         int trackingHiddenPairs,
         int trackingVisiblePairs,
         int trackingBudgetCulled,
-        int trackingDeltas
+        int trackingDeltas,
+        int blockDiffWidth,
+        int blockDiffHeight,
+        int blockDiffDepth,
+        int blockDiffIterations,
+        double javaBlockDiffMs,
+        double rustBlockDiffMs,
+        int blockDiffChanged
     ) {
+        public double blockDiffSpeedup() {
+            return rustBlockDiffMs > 0.0 ? javaBlockDiffMs / rustBlockDiffMs : 0.0;
+        }
     }
 
     /**
-     * Benchmarks the v2.4.0 Rust native kernels asynchronously:
+     * Benchmarks the v2.6.0 Rust native kernels asynchronously:
      * 1. 128x128 Dijkstra Flow-Field Pathfinding with an obstacle wall
      * 2. 256x256 4-octave FBM WorldGen Noise (65,536 blocks)
      * 3. Mob Visibility & Tracking Optimizer (100 players x 2,000 mobs = 200,000 pairs)
+     * 4. Arena 3D Block Diff (64x64x64 = 262,144 blocks, ~15% mutated): Java vs Rust Rayon
      */
     public static KernelBenchmarkReport runKernelsBenchmark(SpicaRustAPI api) {
         final int flowW = 128;
@@ -272,6 +283,61 @@ public final class BridgeBenchmark {
         int trackVisible = Math.max(0, outStats.get(1));
         int trackBudgetCulled = Math.max(0, outStats.get(3));
 
+        // 4) Arena 3D Block Diff (64x64x64 = 262,144 blocks, ~15% mutated): Java vs Rust
+        final int diffW = 64;
+        final int diffH = 64;
+        final int diffD = 64;
+        final int diffVol = diffW * diffH * diffD;
+        final int diffMaxOut = 65_536;
+        final int diffIters = 25;
+
+        int[] jCur = new int[diffVol];
+        int[] jTar = new int[diffVol];
+        int[] jOutX = new int[diffMaxOut];
+        int[] jOutY = new int[diffMaxOut];
+        int[] jOutZ = new int[diffMaxOut];
+        int[] jOutId = new int[diffMaxOut];
+
+        ByteBuffer curBuf = ByteBuffer.allocateDirect(diffVol * Integer.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer tarBuf = ByteBuffer.allocateDirect(diffVol * Integer.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer outRelX = ByteBuffer.allocateDirect(diffMaxOut * Integer.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer outRelY = ByteBuffer.allocateDirect(diffMaxOut * Integer.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer outRelZ = ByteBuffer.allocateDirect(diffMaxOut * Integer.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer outNewId = ByteBuffer.allocateDirect(diffMaxOut * Integer.BYTES).order(ByteOrder.nativeOrder());
+
+        IntBuffer curView = curBuf.asIntBuffer();
+        IntBuffer tarView = tarBuf.asIntBuffer();
+        SplittableRandom diffRng = new SplittableRandom(0x51CA2600L);
+        for (int i = 0; i < diffVol; i++) {
+            int baseId = (i < diffVol / 2) ? 1 : 0;
+            int targetId = (diffRng.nextInt(100) < 15) ? (baseId ^ 5) : baseId;
+            jCur[i] = baseId;
+            jTar[i] = targetId;
+            curView.put(i, baseId);
+            tarView.put(i, targetId);
+        }
+
+        // Warmup Java & Rust block diff
+        for (int w = 0; w < 3; w++) {
+            javaBlockDiff(diffW, diffH, diffD, jCur, jTar, diffMaxOut, jOutX, jOutY, jOutZ, jOutId);
+            api.computeBlockDiff(diffW, diffH, diffD, curBuf, tarBuf, diffMaxOut, outRelX, outRelY, outRelZ, outNewId);
+        }
+
+        long tJavaDiff = System.nanoTime();
+        for (int k = 0; k < diffIters; k++) {
+            javaBlockDiff(diffW, diffH, diffD, jCur, jTar, diffMaxOut, jOutX, jOutY, jOutZ, jOutId);
+        }
+        double javaBlockDiffMs = (System.nanoTime() - tJavaDiff) / 1_000_000.0 / diffIters;
+
+        int diffChanged = 0;
+        long tRustDiff = System.nanoTime();
+        for (int k = 0; k < diffIters; k++) {
+            diffChanged = api.computeBlockDiff(
+                diffW, diffH, diffD, curBuf, tarBuf, diffMaxOut, outRelX, outRelY, outRelZ, outNewId
+            );
+        }
+        double rustBlockDiffMs = (System.nanoTime() - tRustDiff) / 1_000_000.0 / diffIters;
+
         return new KernelBenchmarkReport(
             flowW,
             flowD,
@@ -295,8 +361,49 @@ public final class BridgeBenchmark {
             trackHidden,
             trackVisible,
             trackBudgetCulled,
-            Math.max(0, trackDeltas)
+            Math.max(0, trackDeltas),
+            diffW,
+            diffH,
+            diffD,
+            diffIters,
+            javaBlockDiffMs,
+            rustBlockDiffMs,
+            Math.max(0, diffChanged)
         );
+    }
+
+    private static int javaBlockDiff(
+        int width,
+        int height,
+        int depth,
+        int[] current,
+        int[] target,
+        int maxDiffs,
+        int[] outX,
+        int[] outY,
+        int[] outZ,
+        int[] outId
+    ) {
+        int total = 0;
+        int idx = 0;
+        for (int y = 0; y < height; y++) {
+            for (int z = 0; z < depth; z++) {
+                for (int x = 0; x < width; x++) {
+                    int t = target[idx];
+                    if (current[idx] != t) {
+                        if (total < maxDiffs) {
+                            outX[total] = x;
+                            outY[total] = y;
+                            outZ[total] = z;
+                            outId[total] = t;
+                        }
+                        total++;
+                    }
+                    idx++;
+                }
+            }
+        }
+        return total;
     }
 
     private static void clearDirectBuffer(ByteBuffer buf, int length) {

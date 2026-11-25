@@ -177,6 +177,9 @@ pub struct BrainSnapshot {
     pub server_name: String,
     pub plugin_version: String,
     pub uptime_secs: u64,
+    pub backups_completed: u64,
+    pub last_backup_duration_ms: u64,
+    pub last_backup_size_mb: f64,
 }
 
 /// Single historical telemetry sample kept in the 120-second ring buffer.
@@ -227,6 +230,9 @@ pub struct BrainState {
     pub server_name: String,
     pub plugin_version: String,
     pub uptime_secs: u64,
+    pub backups_completed: u64,
+    pub last_backup_duration_ms: u64,
+    pub last_backup_size_mb: f64,
 
     // Internal governor state
     started_at: Instant,
@@ -342,6 +348,9 @@ impl BrainState {
             server_name: String::new(),
             plugin_version: String::new(),
             uptime_secs: 0,
+            backups_completed: 0,
+            last_backup_duration_ms: 0,
+            last_backup_size_mb: 0.0,
             started_at: Instant::now(),
             level: initial_level,
             recovery_streak: 0,
@@ -387,6 +396,15 @@ impl BrainState {
         };
         self.host_ram_used_mb = ram_used_mb;
         self.host_ram_total_mb = ram_total_mb;
+        self.uptime_secs = self.started_at.elapsed().as_secs();
+    }
+
+    /// Records a completed zero-JVM-overhead Rust world backup.
+    pub fn record_backup(&mut self, duration_ms: u64, size_bytes: u64) {
+        self.backups_completed = self.backups_completed.saturating_add(1);
+        self.last_backup_duration_ms = duration_ms;
+        self.last_backup_size_mb =
+            ((size_bytes as f64 / (1024.0 * 1024.0)) * 100.0).round() / 100.0;
         self.uptime_secs = self.started_at.elapsed().as_secs();
     }
 
@@ -505,6 +523,9 @@ impl BrainState {
             server_name: self.server_name.clone(),
             plugin_version: self.plugin_version.clone(),
             uptime_secs: self.started_at.elapsed().as_secs(),
+            backups_completed: self.backups_completed,
+            last_backup_duration_ms: self.last_backup_duration_ms,
+            last_backup_size_mb: self.last_backup_size_mb,
         }
     }
 }

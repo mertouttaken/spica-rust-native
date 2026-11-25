@@ -4,6 +4,7 @@
 //! - Zero-copy JNI (`GetDirectBufferAddress`) for stock Java 21+ Purpur servers (zero extra JVM flags)
 //! - Pure C ABI (`extern "C"`) for Java 22+ Panama FFM or native tooling.
 
+pub mod block_diff;
 pub mod c_abi;
 pub mod farm_governor;
 pub mod flowfield;

@@ -1,7 +1,7 @@
-# SpicaRustNative v2.5 — Purpur 1.21.4 Core + Rust Brain
+# SpicaRustNative v2.6 — Purpur 1.21.4 Core + Rust Brain
 
 > **Execution Core:** Purpur / Paper 1.21.4 (100% compatible with existing Bukkit/Paper/Purpur plugins)  
-> **Brain & Orchestrator:** Rust (`spica-launcher` + `spica-native`)
+> **Brain, Orchestrator & Tooling:** Rust (`spica-launcher` + `spica-native` + `spica-bot-bench`)
 
 **SpicaRustNative** replaces static `.bat`/`.sh` launch scripts and heavy Java tick bottlenecks with a **3-layer Rust Brain architecture** powered by zero-copy off-heap memory (`DirectByteBuffer` + JNI / C ABI), an $O(N)$ flat CSR Spatial Hash Grid, and a dedicated Rayon multi-core worker pool.
 
@@ -16,7 +16,8 @@
 │    (Generational ZGC or Aikar Tuned G1GC + AlwaysPreTouch)             │
 │  • Runs an async token-authenticated NDJSON IPC Brain server           │
 │  • Computes EWMA MSPT + 2-tick hysteresis (GREEN -> EMERGENCY)         │
-│  • Crash watchdog, interactive console (:brain, :stats, :restart)      │
+│  • Crash watchdog, interactive console (:brain, :stats, :backup, :stop)│
+│  • Zero-JVM-overhead Rust World Backup Engine (.tar.gz + rotation)     │
 │  • Zero-JVM-overhead Embedded Web Dashboard (/) + 120s history chart   │
 │    + /status (JSON) & /metrics (Prometheus)                            │
 └──────────────────────────────────┬─────────────────────────────────────┘
@@ -33,7 +34,8 @@
 │  3) spica-native (.dll / .so — In-Process Rust Compute Engine)         │
 │  • Flat CSR O(N) Spatial Hash Grid + Rayon work-stealing pool          │
 │  • Mob Tracking, Redstone/Hopper Governor, Farm/Villager Governor,     │
-│    Collisions, AI LOD, Surge Guard, Boids, Flow-Field, FBM Noise       │
+│    Collisions, AI LOD, Surge Guard, Boids, Flow-Field, FBM Noise,      │
+│    and Parallel 3D Arena Block Diff Engine (16 JNI exports)            │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -75,22 +77,39 @@ Measured directly inside the running Purpur 1.21.4 JVM (**4 Rayon workers**):
 | **Custom Boids / Flock AI (5,000 entities)** | — | **`2.334 ms/tick`** | 4.7% of a 50ms tick |
 | **Mob Tracking (100p × 2,000m = 200,000 pairs)** | — | **`1.823 ms`** (standalone: `1.117 ms`) | ~0.30 ms/tick @ 6-tick interval |
 | **2D Flow-Field Pathfinding (128×128 w/ wall)** | — | **`2.096 ms`** (standalone: `1.869 ms`) | O(1) per-mob lookup |
-| **Parallel 4-Octave FBM Noise (256×256 = 65,536)** | — | **`2.531 ms`** (standalone: `3.643 ms`) | 256 chunks of terrain |
+| **Parallel 4-Octave FBM Noise (256×256 = 65,536)** | — | **`2.531 ms`** (standalone: `3.025 ms`) | 256 chunks of terrain |
+| **3D Arena Block Diff (64×64×64 = 262k blocks)** | `4.094 ms` | **`1.144 ms`** (1M standalone: `1.114 ms`) | **3.6x faster (-72.1%)** |
 
-### 3. Live World Diagnostics & Standalone Rust Kernels
+### 3. Live 20-Bot Network Stress Test & World Backup Benchmark (v2.6.0)
+
+Executed against a live Purpur 1.21.4 server (~1,169 entities) using the bundled **`spica-bot-bench`** async Minecraft 1.21.4 (**Protocol 769**) bot client (`20/20` bots connected, `0` failures, `0` early disconnects, continuous 250 ms look-vector rotation):
+
+| Metric (20 Live Bots, 16s Window) | Mob Tracking OFF | Mob Tracking ON (`v2.6.0`) | Impact |
+| :--- | :---: | :---: | :---: |
+| **Connected Bots / Early Drops** | `20 / 0` | **`20 / 0`** | 100% stable Protocol 769 |
+| **Live Server TPS / MSPT** | `20.00` | **`20.00` / `16.5 ms`** | `0.280 ms` Rust compute |
+| **Culled `(player, mob)` Tracking Pairs** | `0` | **`15,292` hidden pairs** | Top-K + Rear-FOV + Cave |
+| **Entity Movement Packets (`move/rot/tp`)** | `92,704` | **`76,346`** | **-17.6% movement packets** |
+| **Total Clientbound Packets** | `311,546` (`19,459 pkt/s`) | **`280,944` (`17,548 pkt/s`)** | **-9.8% total packets** |
+| **Server Outbound Bandwidth** | `666.0 KB/s` | **`556.0 KB/s`** | **-16.5% outbound bandwidth** |
+
+- **Live Zero-JVM-Overhead Rust World Backup (`:backup`):** Safely executed `save-off` → `save-all flush` → atomic `.tar.gz` archival across `world`, `world_nether`, `world_the_end` (**122 files, 1.97 MB compressed, skipping `session.lock`**) in **`142 ms`**, then guaranteed `save-on` restoration and updated `spica_backups_completed_total`, `spica_last_backup_duration_ms`, and `spica_last_backup_size_mb`.
+
+### 4. Live World Diagnostics & Standalone Rust Kernels
 
 - **Live World Collision Scan (`/rustbridge scan world` — 800 mobs):** `0.276 ms` in Rust
 - **Live O(N) Chunk Heatmap (`/rustbridge chunks world` — 1,033 entities):** `0.487 ms` in Rust
 - **Standalone Rust Engine (`cargo run --release -p spica-rust-native --bin bench`):**
-  - Chunk Density Heatmap (5,000 entities): `0.249 ms/tick`
-  - Item Merge Planner (2,000 items → 1,568 pairs): `0.702 ms/tick`
-  - Adaptive MSPT Governor evaluation: `4.2 ns/eval`
-  - Farm & Villager Governor (5,000 entities × 100 players): `1.657 ms` (`~0.08 ms/tick` amortized at 1s interval)
-  - **Parallel Mob Tracking (100 players × 2,000 mobs = 200,000 pairs):** **`1.117 ms`** (`~0.19 ms/tick` amortized at 6-tick interval; Cave + Rear-FOV + Hostile-Priority Top-K Budget + Delta Bitset)
-  - **Redstone & Hopper Governor (2,000 active chunks):** **`0.061 ms/eval`** (asymmetric EWMA heat + smooth fractional drop)
-  - 2D Flow-Field Pathfinding (128×128 = 16,384 cells w/ obstacles): `1.869 ms/eval` (O(1) per-mob lookup)
-  - Parallel 4-Octave FBM WorldGen Noise (256×256 = 65,536 blocks): `2.942 ms/eval`
-- **Unit Test Suite:** `52/52` Rust unit tests passing (`spica-launcher`: 17/17, `spica-rust-native`: 35/35)
+  - Chunk Density Heatmap (5,000 entities): `0.117 ms/tick`
+  - Item Merge Planner (2,000 items → 1,568 pairs): `0.434 ms/tick`
+  - Adaptive MSPT Governor evaluation: `4.1 ns/eval`
+  - Farm & Villager Governor (5,000 entities × 100 players): `1.761 ms` (`~0.09 ms/tick` amortized at 1s interval)
+  - **Parallel Mob Tracking (100 players × 2,000 mobs = 200,000 pairs):** **`0.775 ms`** (`~0.13 ms/tick` amortized at 6-tick interval; Cave + Rear-FOV + Hostile-Priority Top-K Budget + Delta Bitset)
+  - **Redstone & Hopper Governor (2,000 active chunks):** **`0.077 ms/eval`** (asymmetric EWMA heat + smooth fractional drop)
+  - **Parallel 3D Arena Block Diff (128×64×128 = 1,048,576 blocks):** **`1.114 ms/eval`** (52,429 changed blocks extracted)
+  - 2D Flow-Field Pathfinding (128×128 = 16,384 cells w/ obstacles): `2.350 ms/eval` (O(1) per-mob lookup)
+  - Parallel 4-Octave FBM WorldGen Noise (256×256 = 65,536 blocks): `3.025 ms/eval`
+- **Unit Test Suite:** `62/62` Rust unit tests passing (`spica-rust-native`: 39/39, `spica-launcher`: 19/19, `spica-bot-bench`: 4/4) and **16/16 JNI symbol parity verified**.
 
 ---
 
@@ -114,7 +133,8 @@ Build the entire workspace (native engine, launcher, tests, and Purpur plugin JA
 
 Artifacts are exported to `dist/windows-x86_64/`:
 - `spica-launcher.exe` — Place next to `purpur-1.21.4.jar`
-- `SpicaRustNative-2.5.0.jar` — Place in `plugins/` (`spica_rust_native.dll` is bundled inside)
+- `SpicaRustNative-2.6.0.jar` — Place in `plugins/` (`spica_rust_native.dll` is bundled inside)
+- `spica-bot-bench.exe` — Optional MC 1.21.4 (Protocol 769) offline-mode bot load & Mob-Tracking benchmark CLI
 
 Run Purpur under the Rust Brain:
 
@@ -125,8 +145,11 @@ Run Purpur under the Rust Brain:
 # Preview detected hardware & generated JVM flags without starting Java
 .\spica-launcher.exe --dry-run
 
-# Launch Purpur 1.21.4 with Rust Brain IPC & HTTP telemetry
+# Launch Purpur 1.21.4 with Rust Brain IPC, Backup Engine & HTTP telemetry
 .\spica-launcher.exe
+
+# Optional: Stress-test an offline-mode dev server with 20 live MC 1.21.4 bots
+.\spica-bot-bench.exe --host 127.0.0.1 --port 25565 --bots 20 --duration 30
 ```
 
 ### Linux (Production — `spica-launcher` + `.so` + `.jar`)
@@ -154,15 +177,16 @@ Every push/PR to `main` and version tag (`v*`) runs [`.github/workflows/ci-relea
 
 ### Launcher Supervisor Commands (Terminal)
 - `:brain` — Live Rust Brain state (`GREEN`–`EMERGENCY`), EWMA MSPT, IPC status, and active directive
-- `:stats` — Host CPU/RAM, JVM heap usage, TPS, entity count, hibernated mobs, and Farm/Villager Governor stats
+- `:stats` — Host CPU/RAM, JVM heap usage, TPS, entity count, hibernated mobs, Farm/Villager Governor, and World Backup stats
+- `:backup` — Runs an immediate zero-JVM-overhead Rust `.tar.gz` world backup (`save-off` → `save-all flush` → archive skipping `session.lock` → guaranteed `save-on` + rotation)
 - `:restart` — Gracefully stops Purpur (`stop`) and restarts cleanly
 - `:stop` — Gracefully shuts down Purpur and exits the launcher
 
 ### Zero-JVM-Overhead Embedded Web Dashboard & HTTP Endpoints
-- `GET http://127.0.0.1:9120/` (or `/dashboard`) — **Embedded Live Web Dashboard** (offline-ready dark ops UI with 120s MSPT/EWMA/TPS canvas chart, Brain State badge, active directives, Farm/Villager Governor & host CPU/RAM telemetry)
+- `GET http://127.0.0.1:9120/` (or `/dashboard`) — **Embedded Live Web Dashboard** (offline-ready dark ops UI with 120s MSPT/EWMA/TPS canvas chart, Brain State badge, active directives, Farm/Villager/Redstone/Tracking/Backup & host CPU/RAM telemetry)
 - `GET http://127.0.0.1:9120/history` — Atomic JSON snapshot + 120-second telemetry ring buffer
 - `GET http://127.0.0.1:9120/status` — Live JSON status snapshot
-- `GET http://127.0.0.1:9120/metrics` — Prometheus exposition metrics (`spica_mspt`, `spica_ewma_mspt`, `spica_tps`, `spica_entities`, `spica_hibernated_mobs`, `spica_farm_throttled_mobs`, `spica_villagers_throttled`, `spica_brain_state`, `spica_host_cpu_percent`, etc.)
+- `GET http://127.0.0.1:9120/metrics` — Prometheus exposition metrics (`spica_mspt`, `spica_ewma_mspt`, `spica_tps`, `spica_entities`, `spica_hibernated_mobs`, `spica_farm_throttled_mobs`, `spica_villagers_throttled`, `spica_tracked_pairs_hidden`, `spica_redstone_chunks_throttled`, `spica_backups_completed_total`, `spica_last_backup_duration_ms`, `spica_brain_state`, `spica_host_cpu_percent`, etc.)
 
 ### In-Game Purpur Commands (`/rustbridge`)
 
@@ -173,7 +197,7 @@ Every push/PR to `main` and version tag (`v*`) runs [`.github/workflows/ci-relea
 | `/rustbridge tracking` | Displays live Rust Mob Tracking stats: hidden/visible/budget-culled `(player, mob)` pairs, delta transitions/sec, and effective Brain-scaled range/cave/FOV/Top-K limits. |
 | `/rustbridge redstone` | Displays live Redstone & Hopper Lag-Machine Governor stats: active/throttled chunks, blocked ops, effective Brain-scaled limits, and Top-8 hottest Redstone/Hopper chunks. |
 | `/rustbridge surge` | Displays live Elytra / Chunk-Load Surge Guard & Explosion Item Buffer stats (chunks/sec, Elytra clamps, buffered explosions, merged debris items). |
-| `/rustbridge kernels` | Runs an **async** live Rust benchmark of 200k-pair Mob Tracking + 128×128 Flow-Field Pathfinding + 256×256 FBM WorldGen Noise inside the running JVM. |
+| `/rustbridge kernels` | Runs an **async** live Rust benchmark of 200k-pair Mob Tracking + 128×128 Flow-Field Pathfinding + 256×256 FBM WorldGen Noise + Java vs Rust 64×64×64 Arena Block Diff inside the running JVM. |
 | `/rustbridge chunks [world]` | Runs the Rust $O(N)$ Chunk Heatmap and lists the Top 8 densest/most crowded chunks with chunk & block coordinates. |
 | `/rustbridge status` | Shows native engine info, Rayon worker count, and AI LOD optimizer stats. |
 | `/rustbridge scan [world]` | Scans all live mobs with Rust Spatial Hash to locate entity-cramming / mob-farm hotspots. |

@@ -19,7 +19,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
 /**
- * Main entry point for SpicaRustNative v2.5.0 (Purpur 1.21.4 Execution Core + Rust Brain + Farm/Surge/Mob-Tracking/Redstone Optimizers).
+ * Main entry point for SpicaRustNative v2.6.0 (Purpur 1.21.4 Execution Core + Rust Brain + Farm/Surge/Mob-Tracking/Redstone Optimizers + Arena Block Diff).
  */
 public final class SpicaRustNativePlugin extends JavaPlugin {
 

@@ -266,7 +266,16 @@ pub fn render_prometheus_metrics(s: &BrainSnapshot) -> String {
          spica_redstone_chunks_throttled {}\n\
          # HELP spica_redstone_ops_blocked_total Cumulative redstone & hopper operations blocked by Rust Redstone Governor.\n\
          # TYPE spica_redstone_ops_blocked_total counter\n\
-         spica_redstone_ops_blocked_total {}\n",
+         spica_redstone_ops_blocked_total {}\n\
+         # HELP spica_backups_completed_total Cumulative world backups completed by Rust Backup Engine.\n\
+         # TYPE spica_backups_completed_total counter\n\
+         spica_backups_completed_total {}\n\
+         # HELP spica_last_backup_duration_ms Duration of the most recent Rust world backup in milliseconds.\n\
+         # TYPE spica_last_backup_duration_ms gauge\n\
+         spica_last_backup_duration_ms {}\n\
+         # HELP spica_last_backup_size_mb Compressed size of the most recent Rust world backup in megabytes.\n\
+         # TYPE spica_last_backup_size_mb gauge\n\
+         spica_last_backup_size_mb {:.2}\n",
         s.mspt,
         s.ewma_mspt,
         s.tps,
@@ -290,6 +299,9 @@ pub fn render_prometheus_metrics(s: &BrainSnapshot) -> String {
         s.tracking_transitions_per_sec,
         s.redstone_chunks_throttled,
         s.redstone_ops_blocked,
+        s.backups_completed,
+        s.last_backup_duration_ms,
+        s.last_backup_size_mb,
     )
 }
 
@@ -321,6 +333,7 @@ mod tests {
             heap_used_mb: 2048,
             heap_max_mb: 8192,
         });
+        brain.record_backup(420, 12 * 1024 * 1024);
         let text = render_prometheus_metrics(&brain.snapshot());
         for metric in [
             "spica_mspt ",
@@ -346,6 +359,12 @@ mod tests {
             "spica_redstone_chunks_throttled 9",
             "# TYPE spica_redstone_ops_blocked_total counter",
             "spica_redstone_ops_blocked_total 15420",
+            "# TYPE spica_backups_completed_total counter",
+            "spica_backups_completed_total 1",
+            "# TYPE spica_last_backup_duration_ms gauge",
+            "spica_last_backup_duration_ms 420",
+            "# TYPE spica_last_backup_size_mb gauge",
+            "spica_last_backup_size_mb 12.00",
         ] {
             assert!(text.contains(metric), "Missing metric: {}", metric);
         }

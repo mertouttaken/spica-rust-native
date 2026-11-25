@@ -12,6 +12,7 @@ pub struct LauncherConfig {
     pub server: ServerConfig,
     pub brain: BrainConfig,
     pub native: NativeConfig,
+    pub backup: BackupConfig,
 }
 
 impl Default for LauncherConfig {
@@ -20,6 +21,7 @@ impl Default for LauncherConfig {
             server: ServerConfig::default(),
             brain: BrainConfig::default(),
             native: NativeConfig::default(),
+            backup: BackupConfig::default(),
         }
     }
 }
@@ -104,6 +106,36 @@ impl Default for NativeConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackupConfig {
+    pub enabled: bool,
+    pub interval_minutes: u64,
+    pub keep_last: usize,
+    pub backup_dir: String,
+    pub worlds: Vec<String>,
+    pub compression_level: u32,
+    pub flush_wait_ms: u64,
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_minutes: 60,
+            keep_last: 5,
+            backup_dir: "backups".to_string(),
+            worlds: vec![
+                "world".to_string(),
+                "world_nether".to_string(),
+                "world_the_end".to_string(),
+            ],
+            compression_level: 3,
+            flush_wait_ms: 2500,
+        }
+    }
+}
+
 impl LauncherConfig {
     /// Loads `spica-launcher.toml` from `path`, or creates a default config if missing.
     /// Returns `(config, created_new)`.
@@ -143,7 +175,7 @@ impl LauncherConfig {
         let body = toml::to_string_pretty(cfg)
             .map_err(|e| format!("TOML serilestirme hatasi: {}", e))?;
         let header = "# SpicaRustNative - Rust Startup Orchestrator & Adaptive Brain Daemon\n\
-                      # Purpur 1.21.4 Core + Rust Brain (spica-launcher v2.0.0)\n\
+                      # Purpur 1.21.4 Core + Rust Brain (spica-launcher v2.6.0)\n\
                       # min_ram_mb / max_ram_mb = 0 -> otomatik donanim boyutlandirmasi\n\
                       # gc_mode = \"auto\" | \"zgc\" | \"g1gc\"\n\n";
         let full = format!("{}{}", header, body);
@@ -185,6 +217,17 @@ impl LauncherConfig {
             || self.brain.base_hibernate_range <= self.brain.base_full_ai_range
         {
             self.brain.base_hibernate_range = self.brain.base_full_ai_range + 16.0;
+        }
+
+        self.backup.interval_minutes = self.backup.interval_minutes.max(1);
+        self.backup.keep_last = self.backup.keep_last.max(1);
+        self.backup.compression_level = self.backup.compression_level.clamp(1, 9);
+        self.backup.flush_wait_ms = self.backup.flush_wait_ms.clamp(500, 15_000);
+        if self.backup.backup_dir.trim().is_empty() {
+            self.backup.backup_dir = "backups".to_string();
+        }
+        if self.backup.worlds.is_empty() {
+            self.backup.worlds = vec!["world".to_string()];
         }
     }
 }

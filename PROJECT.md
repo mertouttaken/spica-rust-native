@@ -59,8 +59,9 @@ spica-rust-native/
 ├── build-windows.ps1           # Windows x86_64 tek komut build (.exe + .dll + .jar)
 ├── build-linux.sh              # Linux x86_64 / aarch64 üretim build (.so + .jar)
 ├── Dockerfile.linux            # Docker ile temiz Linux x86_64 paketleme
-├── spica-native/               # In-process Rust beyin motoru (cdylib + bench)
-├── spica-launcher/             # Rust başlatıcı, supervisor, IPC & HTTP metrik daemon
+├── spica-native/               # In-process Rust beyin motoru (cdylib + bench, 16 JNI)
+├── spica-launcher/             # Rust başlatıcı, supervisor, IPC, World Backup Engine & HTTP dashboard
+├── spica-bot-bench/            # Minecraft 1.21.4 (Protocol 769) asenkron offline bot stres test aracı
 └── spica-rust-native-plugin/   # Purpur 1.21.4 Java 21 eklentisi ve SpicaRustAPI
 ```
 
@@ -96,4 +97,7 @@ spica-rust-native/
 - [x] v2.3.0 Yeni Rust Çekirdekleri: 2D Flow-Field Toplu Pathfinding (`flowfield.rs`) + Paralel 4-Oktav FBM WorldGen Noise (`noise.rs`, `/rustbridge kernels`)
 - [x] v2.4.0 Rust Mob Tracking & Görünürlük Optimizasyon Motoru (`mob_tracker.rs` + `MobTrackingOptimizer.java` — 200.000 `(oyuncu, mob)` çifti `1.117 ms`, dikey mağara culling, arka FOV culling, oyuncu başı Top-K öncelik bütçesi, sıfır-titreme histerezis delta + `Player#hideEntity`/`showEntity`, `/rustbridge tracking`)
 - [x] v2.5.0 Redstone & Hopper Lag Makinesi Frenleyici (`redstone_guard.rs` + `RedstoneHopperGovernor.java` — 2.000 chunk `0.061 ms`, asimetrik EWMA ısı modeli, oyuncu buton/şalter koruması, `/rustbridge redstone` + Prometheus metrikleri)
-- [ ] Özel şematik toplu blok hesaplayıcı ve Rust tabanlı anti-bot/paket ön filtresi
+- [x] v2.6.0 Zero-JVM-Overhead Rust Dünya Yedekleme Motoru (`spica-launcher/src/backup.rs` — `save-off` → `save-all flush` → `session.lock` hariç atomik `.tar.gz` + rotasyon → garantili `save-on`, `:backup` komutu, zamanlayıcı ve Prometheus/Dashboard metrikleri; canlı 3 dünya `142 ms`)
+- [x] v2.6.0 Canlı Minecraft 1.21.4 (Protocol 769) Çoklu Bot Stres & Mob Tracking Test Aracı (`spica-bot-bench` — 20/20 canlı bot, 0 kopma, gerçek entity paket/bant genişliği A/B ölçümü)
+- [x] v2.6.0 Paralel 3D Toplu Blok / Arena Reset Diff Motoru (`block_diff.rs` + 16. JNI `nativeComputeBlockDiff` + `SpicaRustAPI.computeBlockDiff` — canlı JVM `64×64×64` Java'ya göre `3.6x` hızlı (`1.144 ms`), standalone `1M` blok `1.114 ms`)
+- [ ] Rust tabanlı anti-bot / ön-bağlantı hız sınırlayıcı ve gelişmiş şematik yapıştırma entegrasyonu

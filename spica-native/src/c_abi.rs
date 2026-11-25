@@ -3,7 +3,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
 
-use crate::{farm_governor, governor, kernels, noise};
+use crate::{block_diff, farm_governor, governor, kernels, noise};
 
 /// Initialize the Rayon worker thread pool. Pass `0` to auto-select optimal thread count.
 /// Returns active thread count, or `-1` on error.
@@ -77,6 +77,7 @@ pub unsafe extern "C" fn spica_compute_collisions(
     }))
     .unwrap_or(-1)
 }
+
 
 /// Compute batch AI nearest-target + LOD tiers via raw C pointers (zero-copy).
 ///
@@ -162,6 +163,7 @@ pub unsafe extern "C" fn spica_compute_ai_targets(
     }))
     .unwrap_or(-1)
 }
+
 
 /// Evaluate the adaptive MSPT/TPS Governor via raw C pointers.
 ///
@@ -314,6 +316,7 @@ pub unsafe extern "C" fn spica_evaluate_farm_throttling(
     .unwrap_or(-1)
 }
 
+
 /// Generate deterministic parallel 2D FBM gradient noise via raw C pointers (zero-copy).
 ///
 /// Returns the number of generated samples (`width * depth`), or `-1` on error.
@@ -366,3 +369,80 @@ pub unsafe extern "C" fn spica_generate_noise_2d(
     }))
     .unwrap_or(-1)
 }
+
+/// Compute a parallel 3D arena/region block diff in YZX layout via raw C pointers (zero-copy).
+///
+/// Returns total differing blocks (count-only mode when `max_diffs == 0`), or `-1` on error.
+///
+/// # Safety
+/// `current_blocks` and `target_blocks` must be valid, non-null, aligned for `i32`, and have at
+/// least `width * height * depth` elements. When `max_diffs > 0`, all four output pointers must
+/// be non-null, aligned for `i32`, and writable for at least `max_diffs` elements.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn spica_compute_block_diff(
+    width: usize,
+    height: usize,
+    depth: usize,
+    current_blocks: *const i32,
+    target_blocks: *const i32,
+    max_diffs: usize,
+    out_rel_x: *mut i32,
+    out_rel_y: *mut i32,
+    out_rel_z: *mut i32,
+    out_new_block_id: *mut i32,
+) -> i32 {
+    if width == 0 || height == 0 || depth == 0 {
+        return 0;
+    }
+    let Some(plane) = width.checked_mul(depth) else {
+        return -1;
+    };
+    let Some(total) = plane.checked_mul(height) else {
+        return -1;
+    };
+    if total > block_diff::MAX_VOLUME_BLOCKS {
+        return -1;
+    }
+    let align = std::mem::align_of::<i32>();
+    if current_blocks.is_null()
+        || target_blocks.is_null()
+        || (current_blocks as usize) % align != 0
+        || (target_blocks as usize) % align != 0
+    {
+        return -1;
+    }
+    if max_diffs > 0
+        && (out_rel_x.is_null()
+            || out_rel_y.is_null()
+            || out_rel_z.is_null()
+            || out_new_block_id.is_null()
+            || (out_rel_x as usize) % align != 0
+            || (out_rel_y as usize) % align != 0
+            || (out_rel_z as usize) % align != 0
+            || (out_new_block_id as usize) % align != 0)
+    {
+        return -1;
+    }
+
+    catch_unwind(AssertUnwindSafe(|| {
+        let cur = slice::from_raw_parts(current_blocks, total);
+        let tgt = slice::from_raw_parts(target_blocks, total);
+        let (rx, ry, rz, nid) = if max_diffs > 0 {
+            (
+                slice::from_raw_parts_mut(out_rel_x, max_diffs),
+                slice::from_raw_parts_mut(out_rel_y, max_diffs),
+                slice::from_raw_parts_mut(out_rel_z, max_diffs),
+                slice::from_raw_parts_mut(out_new_block_id, max_diffs),
+            )
+        } else {
+            (&mut [][..], &mut [][..], &mut [][..], &mut [][..])
+        };
+
+        crate::run_in_pool(|| {
+            block_diff::compute_block_diff(width, height, depth, cur, tgt, rx, ry, rz, nid)
+        })
+    }))
+    .unwrap_or(-1)
+}
+

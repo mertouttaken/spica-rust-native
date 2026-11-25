@@ -325,4 +325,23 @@ public final class RustNative {
         int maxTopChunks,
         ByteBuffer outTopIndices
     );
+
+    /**
+     * Computes a parallel zero-copy 3D block diff between {@code currentBlocks} and {@code targetBlocks}
+     * (int32 block-state IDs in YZX order: {@code idx = (y * depth + z) * width + x}), returning total
+     * differing blocks and writing up to {@code maxDiffs} changed coordinates & target block IDs into
+     * {@code outRelX}, {@code outRelY}, {@code outRelZ}, and {@code outNewBlockId}.
+     */
+    public static native int nativeComputeBlockDiff(
+        int width,
+        int height,
+        int depth,
+        ByteBuffer currentBlocks,
+        ByteBuffer targetBlocks,
+        int maxDiffs,
+        ByteBuffer outRelX,
+        ByteBuffer outRelY,
+        ByteBuffer outRelZ,
+        ByteBuffer outNewBlockId
+    );
 }

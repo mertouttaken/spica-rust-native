@@ -1,8 +1,8 @@
 name: SpicaRustNative
-version: 2.5.0
+version: 2.6.0
 main: net.spicanetwork.rustnative.SpicaRustNativePlugin
 api-version: '1.21'
-description: Purpur 1.21.4 Execution Core + Rust Brain + Farm/Villager Governor + Elytra/Explosion Surge Guard + Mob Visibility & Tracking Optimizer + Redstone & Hopper Governor + Flow-Field/Noise Kernels
+description: Purpur 1.21.4 Execution Core + Rust Brain + Farm/Villager Governor + Elytra/Explosion Surge Guard + Mob Visibility & Tracking Optimizer + Redstone & Hopper Governor + Arena Block Diff & Flow-Field/Noise Kernels
 authors:
   - Spica Network
 commands:

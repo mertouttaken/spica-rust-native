@@ -725,6 +725,67 @@ public final class SpicaRustAPI {
         );
     }
 
+    /**
+     * Computes a parallel zero-copy 3D arena/region block diff in Rust (YZX layout:
+     * {@code idx = (y * depth + z) * width + x}).
+     *
+     * Returns the total number of differing blocks (which may exceed {@code maxDiffs} if truncated).
+     * When {@code maxDiffs == 0}, runs in count-only mode and output buffers may be empty direct buffers.
+     */
+    public int computeBlockDiff(
+        int width,
+        int height,
+        int depth,
+        ByteBuffer currentBlocks,
+        ByteBuffer targetBlocks,
+        int maxDiffs,
+        ByteBuffer outRelX,
+        ByteBuffer outRelY,
+        ByteBuffer outRelZ,
+        ByteBuffer outNewBlockId
+    ) {
+        ensureLoaded();
+        if (width <= 0 || height <= 0 || depth <= 0) {
+            return 0;
+        }
+        long volume = (long) width * (long) height * (long) depth;
+        if (volume > 16_777_216L) {
+            throw new IllegalArgumentException("Block diff volume exceeds 16,777,216 block safety limit.");
+        }
+        requireDirectBuffer(currentBlocks, "currentBlocks");
+        requireDirectBuffer(targetBlocks, "targetBlocks");
+        long blockBytes = volume * Integer.BYTES;
+        if (currentBlocks.capacity() < blockBytes || targetBlocks.capacity() < blockBytes) {
+            throw new IllegalArgumentException("Block buffers are smaller than width * height * depth * 4 bytes.");
+        }
+
+        int safeMaxDiffs = Math.max(0, maxDiffs);
+        requireDirectBuffer(outRelX, "outRelX");
+        requireDirectBuffer(outRelY, "outRelY");
+        requireDirectBuffer(outRelZ, "outRelZ");
+        requireDirectBuffer(outNewBlockId, "outNewBlockId");
+        long diffBytes = (long) safeMaxDiffs * Integer.BYTES;
+        if (outRelX.capacity() < diffBytes
+            || outRelY.capacity() < diffBytes
+            || outRelZ.capacity() < diffBytes
+            || outNewBlockId.capacity() < diffBytes) {
+            throw new IllegalArgumentException("Block diff output buffers are smaller than maxDiffs * 4 bytes.");
+        }
+
+        return RustNative.nativeComputeBlockDiff(
+            width,
+            height,
+            depth,
+            currentBlocks,
+            targetBlocks,
+            safeMaxDiffs,
+            outRelX,
+            outRelY,
+            outRelZ,
+            outNewBlockId
+        );
+    }
+
     private static void requireDirectBuffer(ByteBuffer buf, String name) {
         if (buf == null || !buf.isDirect()) {
             throw new IllegalArgumentException(name + " must be a non-null direct ByteBuffer.");

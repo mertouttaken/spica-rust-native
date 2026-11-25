@@ -66,7 +66,7 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
         BrainActuator brain = plugin.getBrainActuator();
         BrainDirective dir = brain != null ? brain.getLastDirective() : null;
 
-        sender.sendMessage(Component.text("=== SpicaRustNative v2.5.0 Durum ===", NamedTextColor.GOLD));
+        sender.sendMessage(Component.text("=== SpicaRustNative v2.6.0 Durum ===", NamedTextColor.GOLD));
         sender.sendMessage(Component.text("Platform: " + NativeLoader.detectPlatformKey(), NamedTextColor.GRAY));
         sender.sendMessage(Component.text("Native Engine: " + plugin.getApi().getNativeInfo(), NamedTextColor.AQUA));
         sender.sendMessage(Component.text("Kutuphane: " + NativeLoader.getLoadedPath(), NamedTextColor.DARK_GRAY));
@@ -680,7 +680,7 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
         }
 
         sender.sendMessage(Component.text(
-            "Async Rust kernel benchmark baslatildi (128x128 Flow-Field + 256x256 FBM Noise + 100x2000 Mob Tracking)...",
+            "Async Rust kernel benchmark baslatildi (Flow-Field + FBM Noise + Mob Tracking + 64x64x64 Arena Block Diff)...",
             NamedTextColor.YELLOW
         ));
 
@@ -688,7 +688,7 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
             try {
                 BridgeBenchmark.KernelBenchmarkReport r = BridgeBenchmark.runKernelsBenchmark(plugin.getApi());
                 Bukkit.getScheduler().runTask(plugin, () -> {
-                    sender.sendMessage(Component.text("=== Rust Native Kernels Benchmark (v2.5.0) ===", NamedTextColor.GOLD));
+                    sender.sendMessage(Component.text("=== Rust Native Kernels Benchmark (v2.6.0) ===", NamedTextColor.GOLD));
                     sender.sendMessage(Component.text(
                         String.format(
                             Locale.US,
@@ -741,6 +741,20 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
                         ),
                         NamedTextColor.LIGHT_PURPLE
                     ));
+                    sender.sendMessage(Component.text(
+                        String.format(
+                            Locale.US,
+                            "[Arena Block Diff %dx%dx%d] Java: %.3f ms | Rust (Rayon): %.3f ms (%.1fx hizli | %d degisen blok)",
+                            r.blockDiffWidth(),
+                            r.blockDiffHeight(),
+                            r.blockDiffDepth(),
+                            r.javaBlockDiffMs(),
+                            r.rustBlockDiffMs(),
+                            r.blockDiffSpeedup(),
+                            r.blockDiffChanged()
+                        ),
+                        NamedTextColor.YELLOW
+                    ));
                 });
             } catch (Throwable t) {
                 Bukkit.getScheduler().runTask(plugin, () -> sender.sendMessage(Component.text(
@@ -757,7 +771,7 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
     }
 
     private void sendHelp(CommandSender sender) {
-        sender.sendMessage(Component.text("=== SpicaRustNative v2.5.0 Komutlari ===", NamedTextColor.GOLD));
+        sender.sendMessage(Component.text("=== SpicaRustNative v2.6.0 Komutlari ===", NamedTextColor.GOLD));
         sender.sendMessage(Component.text("/rustbridge status - Native motor, Brain, Farm, Surge, Mob Tracking, Redstone ve optimizer durumu", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge brain - Rust Brain (IPC/In-Process) canli direktif ve metrikler", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge farms - Mob farm & koylu (trading hall) governor durumu", NamedTextColor.GRAY));

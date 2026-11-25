@@ -4,8 +4,8 @@
 use std::time::Instant;
 
 use spica_rust_native::{
-    farm_governor, flowfield, governor, heatmap, init_thread_pool, kernels, mob_tracker, noise,
-    redstone_guard, run_in_pool,
+    block_diff, farm_governor, flowfield, governor, heatmap, init_thread_pool, kernels,
+    mob_tracker, noise, redstone_guard, run_in_pool,
 };
 
 fn lcg_next(state: &mut u64) -> f32 {
@@ -525,6 +525,41 @@ fn main() {
         dt_redstone, rs_throttled, rs_chunks, hottest_idx, hottest_heat
     );
 
+    // 12) Arena Block Diff (128 x 64 x 128 = 1,048,576 blocks, ~5% mutated)
+    let (bd_w, bd_h, bd_d) = (128usize, 64usize, 128usize);
+    let bd_vol = bd_w * bd_h * bd_d;
+    let bd_cur = vec![1i32; bd_vol];
+    let mut bd_tgt = bd_cur.clone();
+    for i in (0..bd_vol).step_by(20) {
+        bd_tgt[i] = 42;
+    }
+    let bd_cap = 65_536usize;
+    let mut bd_rx = vec![0i32; bd_cap];
+    let mut bd_ry = vec![0i32; bd_cap];
+    let mut bd_rz = vec![0i32; bd_cap];
+    let mut bd_nid = vec![0i32; bd_cap];
+
+    let bd_iters = 50usize;
+    run_in_pool(|| {
+        block_diff::compute_block_diff(
+            bd_w, bd_h, bd_d, &bd_cur, &bd_tgt, &mut bd_rx, &mut bd_ry, &mut bd_rz, &mut bd_nid,
+        )
+    });
+    let t11 = Instant::now();
+    let mut bd_written = 0i32;
+    for _ in 0..bd_iters {
+        bd_written = run_in_pool(|| {
+            block_diff::compute_block_diff(
+                bd_w, bd_h, bd_d, &bd_cur, &bd_tgt, &mut bd_rx, &mut bd_ry, &mut bd_rz, &mut bd_nid,
+            )
+        });
+    }
+    let dt_block_diff = t11.elapsed().as_secs_f64() * 1000.0 / (bd_iters as f64);
+    println!(
+        "[12] Arena Block Diff (128x64x128 = 1M blocks): {:.3} ms/eval (changed blocks extracted: {})",
+        dt_block_diff, bd_written
+    );
+
     let total_ms = dt_coll
         + dt_ai
         + dt_boids
@@ -540,7 +575,7 @@ fn main() {
         total_ms / 50.0 * 100.0
     );
     println!(
-        "Async/On-demand kernels [8..9]: Flow-Field={:.3} ms | FBM-Noise={:.3} ms",
-        dt_flow, dt_noise
+        "Async/On-demand kernels [8..9, 12]: Flow-Field={:.3} ms | FBM-Noise={:.3} ms | Block-Diff(1M)={:.3} ms",
+        dt_flow, dt_noise, dt_block_diff
     );
 }

@@ -29,13 +29,17 @@ mvn -B clean package
 
 echo "[4/4] Ciktilar $DIST_DIR klasorune toplaniyor..."
 mkdir -p "$DIST_DIR"
-cp -f "$PLUGIN_DIR/target/SpicaRustNative-2.5.0.jar" "$DIST_DIR/SpicaRustNative-2.5.0.jar"
+cp -f "$PLUGIN_DIR/target/SpicaRustNative-2.6.0.jar" "$DIST_DIR/SpicaRustNative-2.6.0.jar"
 cp -f "$ROOT_DIR/target/release/spica-launcher" "$DIST_DIR/spica-launcher"
 cp -f "$ROOT_DIR/target/release/libspica_rust_native.so" "$DIST_DIR/libspica_rust_native.so"
+if [ -f "$ROOT_DIR/target/release/spica-bot-bench" ]; then
+  cp -f "$ROOT_DIR/target/release/spica-bot-bench" "$DIST_DIR/spica-bot-bench"
+  chmod +x "$DIST_DIR/spica-bot-bench"
+fi
 chmod +x "$DIST_DIR/spica-launcher"
 
 echo ""
 echo "TAMAMLANDI!"
 echo "  Rust Launcher : $DIST_DIR/spica-launcher"
-echo "  Purpur Plugin : $DIST_DIR/SpicaRustNative-2.5.0.jar"
+echo "  Purpur Plugin : $DIST_DIR/SpicaRustNative-2.6.0.jar"
 echo "  Native Engine : $DIST_DIR/libspica_rust_native.so"

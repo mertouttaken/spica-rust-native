@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "spica-native",
     "spica-launcher",
+    "spica-bot-bench",
 ]
 
 [profile.release]

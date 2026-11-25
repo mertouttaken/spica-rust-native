@@ -1,10 +1,11 @@
 <#
 .SYNOPSIS
-    SpicaRustNative v2.5 Windows x86_64 build script
+    SpicaRustNative v2.6 Windows x86_64 build script
     Derler:
       1. spica_rust_native.dll        (In-Process Rust Brain Engine - Spatial Hash + Rayon + Governor)
-      2. spica-launcher.exe      (Rust Startup Orchestrator, Supervisor & Brain IPC/HTTP Daemon)
-      3. SpicaRustNative-2.5.0.jar (Purpur 1.21.4 Plugin, .dll gomulu)
+      2. spica-launcher.exe      (Rust Startup Orchestrator, Supervisor, Backup & Brain Daemon)
+      3. spica-bot-bench.exe     (MC 1.21.4 Offline Bot Load & Mob-Tracking Stress Tester)
+      4. SpicaRustNative-2.6.0.jar (Purpur 1.21.4 Plugin, .dll gomulu)
 #>
 
 param(
@@ -63,15 +64,18 @@ try {
 
 Write-Host "`n[4/4] Ciktilar dist/windows-x86_64 klasorune toplaniyor..." -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
-$JarPath = Join-Path $PluginDir "target\SpicaRustNative-2.5.0.jar"
-Copy-Item -Force $JarPath (Join-Path $DistDir "SpicaRustNative-2.5.0.jar")
+$JarPath = Join-Path $PluginDir "target\SpicaRustNative-2.6.0.jar"
+$BotBenchPath = Join-Path $RootDir "target\release\spica-bot-bench.exe"
+Copy-Item -Force $JarPath (Join-Path $DistDir "SpicaRustNative-2.6.0.jar")
 Copy-Item -Force $LauncherPath (Join-Path $DistDir "spica-launcher.exe")
 Copy-Item -Force $DllPath (Join-Path $DistDir "spica_rust_native.dll")
+if (Test-Path $BotBenchPath) { Copy-Item -Force $BotBenchPath (Join-Path $DistDir "spica-bot-bench.exe") }
 
 Write-Host "`nTAMAMLANDI!" -ForegroundColor Green
 Write-Host "  Rust Launcher : $DistDir\spica-launcher.exe"
-Write-Host "  Purpur Plugin : $DistDir\SpicaRustNative-2.5.0.jar"
+Write-Host "  Purpur Plugin : $DistDir\SpicaRustNative-2.6.0.jar"
 Write-Host "  Native Engine : $DistDir\spica_rust_native.dll"
+Write-Host "  Bot Bench CLI : $DistDir\spica-bot-bench.exe"
 Write-Host "`nKullanim:" -ForegroundColor Yellow
-Write-Host "  1. SpicaRustNative-2.5.0.jar -> Purpur 1.21.4 sunucunun plugins/ klasorune at"
+Write-Host "  1. SpicaRustNative-2.6.0.jar -> Purpur 1.21.4 sunucunun plugins/ klasorune at"
 Write-Host "  2. spica-launcher.exe        -> purpur-1.21.4.jar yanina koy ve calistir"
