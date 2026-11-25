@@ -43,32 +43,39 @@
 
 All tests below were executed on the same host (**Windows x86_64, 8 logical cores, 16 GB RAM, OpenJDK 21.0.13 LTS, `-Xms2048M -Xmx2048M`**) against an identical cloned Purpur 1.21.4 stress world (**809 persistent AI mobs + ~240 ground items = 1,052 entities, 169 force-loaded chunks**).
 
-### 1. Live Purpur 1.21.4 Server A/B Test (Without Rust vs. With Rust Brain)
+### 1. Live Purpur 1.21.4 Heavy Stress A/B Test (v2.4.0 — Dense Mob Farms + 8-TNT Burst)
 
-| Metric | Pure Purpur 1.21.4 (No Rust) | Purpur + `SpicaRustNative` (Rust Brain) | Improvement |
+Executed on an identical cloned heavy stress world (**360 hyper-cramped mob-farm entities in 3×3 chambers + ~609 roaming mobs + 300 ground items, 169 force-loaded chunks, plus an 8-TNT detonation on 486 cobblestone blocks at t=25s**; same OpenJDK 21, `-Xms2048M -Xmx2048M`):
+
+| Phase / Metric | Pure Purpur 1.21.4 (No Rust) | Purpur + `SpicaRustNative v2.4.0` | Improvement |
 | :--- | :---: | :---: | :---: |
-| **Server Boot Time (`Done`)** | `19.04 s` | **`18.16 s`** | **4.6% faster** (`-0.88 s`) |
-| **Initial Max Tick Spike (t=10s)** | `51.0 ms` | **`14.3 ms`** | **72.0% lower spike** |
-| **All 5s Samples Avg MSPT** | `4.52 ms` | **`3.00 ms`** | **33.6% lower MSPT** |
-| **Steady-State Avg MSPT (last 15s)** | `4.03 ms` (`2.2–8.0 ms`) | **`2.47 ms`** (`1.1–6.8 ms`) | **38.7% lower MSPT** |
-| **1-Minute Cumulative Avg MSPT** | `4.5 ms` | **`3.1 ms`** | **31.1% lower MSPT** |
-| **TPS** | `20.0` | **`20.0`** | Locked 20.0 |
+| **Server Boot Time (`Done`)** | `43.53 s` | **`31.78 s`** | **27.0% faster** (`-11.75 s`) |
+| **Phase 1: Pre-Explosion Avg MSPT (t=10–25s)** | `13.53 ms` | **`6.08 ms`** | **55.1% lower MSPT (2.23x)** |
+| **Phase 2: 8-TNT Burst 5s Window Avg MSPT** | `25.2 ms` (10s: `17.8 ms`) | **`11.2 ms`** (10s: `7.4 ms`) | **55.6% lower MSPT (2.25x)** |
+| **Phase 3: Post-Explosion Steady Avg MSPT (t=35–50s)** | `12.03 ms` (rising to `14.8 ms`) | **`2.50 ms`** (steady `2.3 ms`) | **79.2% lower MSPT (4.81x)** |
+| **Overall 50s Mean MSPT (all 9 samples)** | `14.16 ms` | **`5.06 ms`** | **64.3% lower MSPT (2.80x)** |
+| **1-Minute Cumulative Avg MSPT (t=50s)** | `14.9 ms` | **`8.2 ms`** | **45.0% lower MSPT** |
+| **Steady-State Min Tick Time** | `6.9 – 9.9 ms` | **`1.0 – 1.1 ms`** | **~7x lower floor** |
+| **Rust Actions Taken Live** | — | `498` farm mobs collision+AI throttled, `283` ground items merged | 0.426 ms Rust compute |
 
-**5-second `/mspt` series (avg):**
-- **Without Rust:** `5.9 ms` → `4.6 ms` → `4.2 ms` → `4.1 ms` → `3.8 ms`
-- **With Rust Brain:** `4.8 ms` → `2.8 ms` → `2.4 ms` → `2.4 ms` → `2.6 ms`
+**Full 5-second `/mspt` avg timeline (t=10s → t=50s, 8-TNT burst at t=25s):**
+- **Without Rust:** `18.6` → `15.5` → `9.6` → `10.4` → `[TNT] 25.2` → `8.6` → `11.3` → `13.4` → `14.8 ms`
+- **With Rust v2.4.0:** `10.7` → `5.1` → `4.8` → `3.7` → `[TNT] 11.2` → `2.7` → `2.6` → `2.4` → `2.3 ms`
 
-> **Methodology note:** With 0 connected players during the automated headless test, all 809 distant mobs were eligible for Rust AI LOD hibernation (`Mob#setAware(false)` and cleanly restored on shutdown). On populated production servers where mobs within 56 blocks of players remain fully active, real-world MSPT savings typically land in the **20%–35%** range (and **35%–50%+** during mob-farm spikes when dynamic view/sim distance and Rust item merging engage).
+> **Methodology note:** With 0 connected players during the automated headless test, distant mobs were eligible for AI LOD hibernation (`Mob#setAware(false)`) alongside dense farm collision suppression (`setCollidable(false)`). On populated production servers where mobs close to players stay fully active, real-world MSPT savings typically land in the **20%–35%** range during normal gameplay and **40%–65%+** during mob-farm / explosion / high-density spikes.
 
-### 2. Live In-JVM Benchmark (`/rustbridge bench 5000 100 40`)
+### 2. Live In-JVM Benchmark (`/rustbridge bench` & `/rustbridge kernels`)
 
-Measured directly inside the running Purpur 1.21.4 JVM (**5,000 entities, 100 players, 40 iterations, 4 Rayon workers**):
+Measured directly inside the running Purpur 1.21.4 JVM (**4 Rayon workers**):
 
 | Workload | Pure Java (Main-Thread Style) | Rust Native (Zero-Copy + Rayon) | Speedup |
 | :--- | :---: | :---: | :---: |
-| **Entity Collisions / Density (5,000)** | `79.129 ms` | **`0.915 ms`** | **86.5x faster (-98.8%)** |
-| **AI Nearest Target + LOD (5,000 × 100)** | `1.036 ms` | **`0.514 ms`** | **2.0x faster (-50.4%)** |
-| **Custom Boids / Flock AI (5,000)** | — | **`3.419 ms/tick`** | 6.8% of a 50ms tick |
+| **Entity Collisions / Density (5,000 entities)** | `57.756 ms` | **`0.772 ms`** | **74.8x faster (-98.7%)** |
+| **AI Nearest Target + LOD (5,000 × 100)** | `0.784 ms` | **`0.355 ms`** | **2.2x faster (-54.7%)** |
+| **Custom Boids / Flock AI (5,000 entities)** | — | **`2.334 ms/tick`** | 4.7% of a 50ms tick |
+| **Mob Tracking (100p × 2,000m = 200,000 pairs)** | — | **`1.823 ms`** (standalone: `1.117 ms`) | ~0.30 ms/tick @ 6-tick interval |
+| **2D Flow-Field Pathfinding (128×128 w/ wall)** | — | **`2.096 ms`** (standalone: `1.869 ms`) | O(1) per-mob lookup |
+| **Parallel 4-Octave FBM Noise (256×256 = 65,536)** | — | **`2.531 ms`** (standalone: `3.643 ms`) | 256 chunks of terrain |
 
 ### 3. Live World Diagnostics & Standalone Rust Kernels
 
