@@ -149,7 +149,7 @@ public final class EntityLodOptimizer {
 
             for (int i = 0; i < mobCount; i++) {
                 Mob mob = mobScratch.get(i);
-                int tier = mainThreadArena.outIntB.get(i);
+                int tier = mainThreadArena.getOutIntB(i);
 
                 if (tier == RustNative.LOD_HIBERNATE) {
                     if (aiOwnership.suppressAi(mob, MobAiOwnershipManager.REASON_LOD)) {
@@ -215,7 +215,7 @@ public final class EntityLodOptimizer {
         Location worstLocation = null;
 
         for (int i = 0; i < n; i++) {
-            int neighbors = mainThreadArena.outIntA.get(i);
+            int neighbors = mainThreadArena.getOutIntA(i);
             if (neighbors >= crammingAlertNeighbors) {
                 crowdedMobs++;
             }

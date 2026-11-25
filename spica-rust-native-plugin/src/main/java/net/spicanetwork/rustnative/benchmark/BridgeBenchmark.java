@@ -108,7 +108,7 @@ public final class BridgeBenchmark {
         }
 
         // Probe costGrid format cleanly (u8 default, fallback to i32 / f32 if kernel requires 4-byte cells)
-        int probe = api.computeFlowField(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ);
+        int probe = api.computeFlowFieldWithExclusiveBuffers(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ);
         if (probe < 0) {
             ByteBuffer costGridInt = ByteBuffer.allocateDirect(flowCells * Integer.BYTES).order(ByteOrder.nativeOrder());
             IntBuffer costIntView = costGridInt.asIntBuffer();
@@ -118,7 +118,7 @@ public final class BridgeBenchmark {
                     costIntView.put(z * flowW + x, isWall ? 0 : 1);
                 }
             }
-            int intProbe = api.computeFlowField(flowW, flowD, costGridInt, goalX, goalZ, outDist, outDirX, outDirZ);
+            int intProbe = api.computeFlowFieldWithExclusiveBuffers(flowW, flowD, costGridInt, goalX, goalZ, outDist, outDirX, outDirZ);
             if (intProbe >= 0) {
                 costGrid = costGridInt;
                 probe = intProbe;
@@ -132,7 +132,7 @@ public final class BridgeBenchmark {
                     }
                 }
                 costGrid = costGridFloat;
-                probe = api.computeFlowField(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ);
+                probe = api.computeFlowFieldWithExclusiveBuffers(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ);
             }
         }
 
@@ -140,7 +140,7 @@ public final class BridgeBenchmark {
         requireNativeOk(probe, "computeFlowField");
         for (int w = 0; w < 3; w++) {
             requireNativeOk(
-                api.computeFlowField(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ),
+                api.computeFlowFieldWithExclusiveBuffers(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ),
                 "computeFlowField"
             );
         }
@@ -149,7 +149,7 @@ public final class BridgeBenchmark {
         long tFlowStart = System.nanoTime();
         for (int k = 0; k < flowIters; k++) {
             reachable = requireNativeOk(
-                api.computeFlowField(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ),
+                api.computeFlowFieldWithExclusiveBuffers(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ),
                 "computeFlowField"
             );
         }
@@ -170,7 +170,7 @@ public final class BridgeBenchmark {
 
         for (int w = 0; w < 3; w++) {
             requireNativeOk(
-                api.generateNoise2D(0.0f, 0.0f, noiseW, noiseD, 1.0f, 0x51CA2026, noiseOctaves, 0.008f, 2.0f, 0.5f, outHeights),
+                api.generateNoise2DWithExclusiveBuffers(0.0f, 0.0f, noiseW, noiseD, 1.0f, 0x51CA2026, noiseOctaves, 0.008f, 2.0f, 0.5f, outHeights),
                 "generateNoise2D"
             );
         }
@@ -179,7 +179,7 @@ public final class BridgeBenchmark {
         long tNoiseStart = System.nanoTime();
         for (int k = 0; k < noiseIters; k++) {
             noiseSamples = requireNativeOk(
-                api.generateNoise2D(
+                api.generateNoise2DWithExclusiveBuffers(
                     0.0f, 0.0f, noiseW, noiseD, 1.0f, 0x51CA2026, noiseOctaves, 0.008f, 2.0f, 0.5f, outHeights
                 ),
                 "generateNoise2D"
@@ -271,7 +271,7 @@ public final class BridgeBenchmark {
         for (int w = 0; w < 3; w++) {
             clearDirectBuffer(visBitsetBuf, trackBitsetBytes);
             requireNativeOk(
-                api.computeMobTracking(
+                api.computeMobTrackingWithExclusiveBuffers(
                     trackMobs, mobXsBuf, mobYsBuf, mobZsBuf, mobFlagsBuf,
                     trackPlayers, pXsBuf, pYsBuf, pZsBuf, pLookXsBuf, pLookYsBuf, pLookZsBuf,
                     48.0f, 12.0f, 24.0f, 16.0f, -0.25f, 72, BrainDirective.STATE_GREEN,
@@ -287,7 +287,7 @@ public final class BridgeBenchmark {
             clearDirectBuffer(visBitsetBuf, trackBitsetBytes);
             long tTrackStart = System.nanoTime();
             trackDeltas = requireNativeOk(
-                api.computeMobTracking(
+                api.computeMobTrackingWithExclusiveBuffers(
                     trackMobs, mobXsBuf, mobYsBuf, mobZsBuf, mobFlagsBuf,
                     trackPlayers, pXsBuf, pYsBuf, pZsBuf, pLookXsBuf, pLookYsBuf, pLookZsBuf,
                     48.0f, 12.0f, 24.0f, 16.0f, -0.25f, 72, BrainDirective.STATE_GREEN,
@@ -340,7 +340,7 @@ public final class BridgeBenchmark {
         for (int w = 0; w < 3; w++) {
             javaBlockDiff(diffW, diffH, diffD, jCur, jTar, diffMaxOut, jOutX, jOutY, jOutZ, jOutId);
             requireNativeOk(
-                api.computeBlockDiff(diffW, diffH, diffD, curBuf, tarBuf, diffMaxOut, outRelX, outRelY, outRelZ, outNewId),
+                api.computeBlockDiffWithExclusiveBuffers(diffW, diffH, diffD, curBuf, tarBuf, diffMaxOut, outRelX, outRelY, outRelZ, outNewId),
                 "computeBlockDiff"
             );
         }
@@ -355,7 +355,7 @@ public final class BridgeBenchmark {
         long tRustDiff = System.nanoTime();
         for (int k = 0; k < diffIters; k++) {
             diffChanged = requireNativeOk(
-                api.computeBlockDiff(
+                api.computeBlockDiffWithExclusiveBuffers(
                     diffW, diffH, diffD, curBuf, tarBuf, diffMaxOut, outRelX, outRelY, outRelZ, outNewId
                 ),
                 "computeBlockDiff"

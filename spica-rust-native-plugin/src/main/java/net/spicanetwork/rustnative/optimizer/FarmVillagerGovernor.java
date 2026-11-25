@@ -294,8 +294,8 @@ public final class FarmVillagerGovernor implements Listener {
             for (int i = 0; i < mobCount; i++) {
                 Mob mob = mobScratch.get(i);
                 UUID id = mob.getUniqueId();
-                int inputFlags = farmArena.flags.get(i);
-                int action = farmArena.outIntA.get(i);
+                int inputFlags = farmArena.getFlags(i);
+                int action = farmArena.getOutIntA(i);
 
                 if ((inputFlags & RustNative.FLAG_PROTECTED) != 0) {
                     action = RustNative.ACTION_NORMAL;

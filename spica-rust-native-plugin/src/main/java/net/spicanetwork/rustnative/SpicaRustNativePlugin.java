@@ -4,6 +4,7 @@ import net.spicanetwork.rustnative.api.SpicaRustAPI;
 import net.spicanetwork.rustnative.brain.BrainActuator;
 import net.spicanetwork.rustnative.brain.BrainDirective;
 import net.spicanetwork.rustnative.brain.BrainIpcClient;
+import net.spicanetwork.rustnative.command.BackupCheckpointCommand;
 import net.spicanetwork.rustnative.command.RustBridgeCommand;
 import net.spicanetwork.rustnative.nativebridge.NativeLoader;
 import net.spicanetwork.rustnative.nativebridge.RustNative;
@@ -43,6 +44,11 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
     @Override
     public void onEnable() {
         saveDefaultConfig();
+
+        PluginCommand checkpointCommand = getCommand("spicabackupcheckpoint");
+        if (checkpointCommand != null) {
+            checkpointCommand.setExecutor(new BackupCheckpointCommand(getLogger()));
+        }
 
         try {
             boolean allowExternalOverride = getConfig().getBoolean("native.allow-external-override", false);

@@ -1,6 +1,6 @@
-use crate::backup::{create_world_backup_cancellable, BackupCancelGate, BackupOutcome};
+use crate::backup::{create_snapshot_backup, BackupCancelGate, BackupOutcome};
 use crate::brain::BrainState;
-use crate::config::LauncherConfig;
+use crate::config::{generate_auth_token, BackupConfig, LauncherConfig};
 use crate::preflight::JvmPlan;
 use std::io::BufRead;
 use std::process::Stdio;
@@ -15,8 +15,6 @@ use tokio::task::JoinHandle;
 const GRACEFUL_STOP_TIMEOUT_SECS: u64 = 30;
 const STABLE_UPTIME_RESET_SECS: u64 = 300;
 const STDIN_WRITE_TIMEOUT_SECS: u64 = 3;
-const SAVE_OFF_ACK_TIMEOUT_SECS: u64 = 10;
-const SAVE_ON_ACK_TIMEOUT_SECS: u64 = 10;
 const MIN_FLUSH_ACK_TIMEOUT_MS: u64 = 15_000;
 const BACKUP_CANCEL_DRAIN_SECS: u64 = 15;
 
@@ -27,50 +25,27 @@ enum SupervisorAction {
     Stop,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PurpurSaveEvent {
-    SaveOffDisabledNow,
-    SaveOffAlreadyOff,
-    SaveAllFlushed,
-    SaveOnAck,
+#[derive(Debug, PartialEq, Eq)]
+struct CheckpointEvent {
+    id: String,
+    saved: bool,
 }
 
 enum BackupPhase {
     Idle,
-    WaitingSaveOff {
-        generation: u64,
+    WaitingCheckpoint {
+        id: String,
         deadline: tokio::time::Instant,
-        flush_wait_ms: u64,
-    },
-    WaitingFlush {
-        generation: u64,
-        deadline: tokio::time::Instant,
-        restore_save_on: bool,
     },
     Archiving {
-        generation: u64,
-        restore_save_on: bool,
         cancel_gate: Arc<BackupCancelGate>,
         rx: oneshot::Receiver<Result<BackupOutcome, String>>,
-    },
-    WaitingSaveOn {
-        generation: u64,
-        deadline: tokio::time::Instant,
     },
 }
 
 impl BackupPhase {
     fn is_active(&self) -> bool {
-        !matches!(self, BackupPhase::Idle)
-    }
-
-    fn blocks_save_commands(&self) -> bool {
-        matches!(
-            self,
-            BackupPhase::WaitingSaveOff { .. }
-                | BackupPhase::WaitingFlush { .. }
-                | BackupPhase::Archiving { .. }
-        )
+        !matches!(self, Self::Idle)
     }
 }
 
@@ -186,26 +161,28 @@ fn is_valid_server_info_prefix(prefix: &str) -> bool {
     &prefix[9..] == "] [Server thread/"
 }
 
-/// Strictly parses Purpur/Paper server stdout save-lifecycle log lines.
-///
-/// Requires a strict `[HH:MM:SS INFO]: <message>` (or `[HH:MM:SS] [Server thread/INFO]: <message>`)
-/// server log header so neither player chat nor WARN/ERROR/plugin stdout can spoof flush completion.
-fn detect_save_event(line: &str) -> Option<PurpurSaveEvent> {
+/// Only a structured checkpoint result for the requested ID can start a backup.
+fn detect_checkpoint_event(line: &str) -> Option<CheckpointEvent> {
     let clean = strip_ansi(line);
-    let trimmed = clean.trim_end();
-    let (prefix, msg) = trimmed.split_once("INFO]: ")?;
+    let (prefix, msg) = clean.trim_end().split_once("INFO]: ")?;
     if !is_valid_server_info_prefix(prefix) {
         return None;
     }
-    match msg.trim() {
-        "Saved the game" | "Saved the world" => Some(PurpurSaveEvent::SaveAllFlushed),
-        "Automatic saving is now disabled" => Some(PurpurSaveEvent::SaveOffDisabledNow),
-        "Saving is already turned off" => Some(PurpurSaveEvent::SaveOffAlreadyOff),
-        "Automatic saving is now enabled" | "Saving is already turned on" => {
-            Some(PurpurSaveEvent::SaveOnAck)
-        }
-        _ => None,
+    let (id, status) = msg
+        .strip_prefix("[SpicaRustNative] SpicaBackup checkpoint ")?
+        .split_once(' ')?;
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
     }
+    let saved = match status {
+        "saved" => true,
+        "failed" => false,
+        _ => return None,
+    };
+    Some(CheckpointEvent {
+        id: id.to_string(),
+        saved,
+    })
 }
 
 /// Extracts the normalized base console command token, stripping leading `/` and optional
@@ -226,7 +203,7 @@ fn normalize_console_command(trimmed: &str) -> String {
 async fn pipe_stream<R: AsyncRead + Unpin>(
     reader: R,
     is_stderr: bool,
-    save_tx: Option<mpsc::UnboundedSender<PurpurSaveEvent>>,
+    save_tx: Option<mpsc::UnboundedSender<CheckpointEvent>>,
 ) {
     let mut buf_reader = BufReader::new(reader);
     let mut raw = Vec::with_capacity(512);
@@ -241,7 +218,7 @@ async fn pipe_stream<R: AsyncRead + Unpin>(
                     eprintln!("{}", line);
                 } else {
                     if let Some(tx) = save_tx.as_ref() {
-                        if let Some(ev) = detect_save_event(line) {
+                        if let Some(ev) = detect_checkpoint_event(line) {
                             let _ = tx.send(ev);
                         }
                     }
@@ -284,66 +261,17 @@ async fn send_to_child(child_stdin: &mut Option<ChildStdin>, line: &str) -> Resu
     }
 }
 
-/// Cancels any active backup transaction, waits for the blocking archiver to stop and clean up
-/// its temporary file, and restores `save-on` only when `allow_restore_save_on` is true AND this
-/// backup transaction actually disabled automatic saving (R4: preserves prior admin `save-off`).
-async fn abort_active_backup(
-    backup_phase: &mut BackupPhase,
-    child_stdin: &mut Option<ChildStdin>,
-    allow_restore_save_on: bool,
-) {
-    let prev = std::mem::replace(backup_phase, BackupPhase::Idle);
-    match prev {
-        BackupPhase::Idle => {}
-        BackupPhase::WaitingSaveOff { .. } => {
-            println!("[SpicaBackup] Bekleyen yedek save-off onayi iptal edildi.");
-            if allow_restore_save_on {
-                if let Err(err) = send_to_child(child_stdin, "save-on").await {
-                    eprintln!("[SpicaBackup] UYARI: iptal sonrasi save-on gonderilemedi: {}", err);
-                }
-            }
-        }
-        BackupPhase::WaitingFlush {
-            restore_save_on, ..
-        } => {
-            println!("[SpicaBackup] Bekleyen yedek flush islemi iptal edildi.");
-            if allow_restore_save_on && restore_save_on {
-                if let Err(err) = send_to_child(child_stdin, "save-on").await {
-                    eprintln!("[SpicaBackup] UYARI: iptal sonrasi save-on gonderilemedi: {}", err);
-                }
-            } else if allow_restore_save_on {
-                println!("[SpicaBackup] Not: Yedek oncesi save-off durumu korundu.");
-            }
-        }
-        BackupPhase::Archiving {
-            restore_save_on,
-            cancel_gate,
-            rx,
-            ..
-        } => {
-            println!("[SpicaBackup] Aktif yedekleme iptal ediliyor, gecici dosya temizleniyor...");
-            let _ = cancel_gate.request_cancel();
-            match tokio::time::timeout(Duration::from_secs(BACKUP_CANCEL_DRAIN_SECS), rx).await {
-                Ok(_) => {}
-                Err(_) => {
-                    eprintln!(
-                        "[SpicaBackup] UYARI: Arsivleme iscisi {} sn icinde sonlanmadi (publish kilidi iptal modunda).",
-                        BACKUP_CANCEL_DRAIN_SECS
-                    );
-                }
-            }
-            if allow_restore_save_on && restore_save_on {
-                if let Err(err) = send_to_child(child_stdin, "save-on").await {
-                    eprintln!("[SpicaBackup] UYARI: iptal sonrasi save-on gonderilemedi: {}", err);
-                }
-            } else if allow_restore_save_on {
-                println!("[SpicaBackup] Not: Yedek oncesi save-off durumu korundu.");
-            }
-        }
-        BackupPhase::WaitingSaveOn { .. } => {
-            if allow_restore_save_on {
-                let _ = send_to_child(child_stdin, "save-on").await;
-            }
+/// Cancel any worker and allow it to release the snapshot before child shutdown.
+async fn abort_active_backup(backup_phase: &mut BackupPhase) {
+    if let BackupPhase::Archiving { cancel_gate, rx } =
+        std::mem::replace(backup_phase, BackupPhase::Idle)
+    {
+        let _ = cancel_gate.request_cancel();
+        if tokio::time::timeout(Duration::from_secs(BACKUP_CANCEL_DRAIN_SECS), rx)
+            .await
+            .is_err()
+        {
+            eprintln!("[SpicaBackup] Snapshot iscisi zamaninda kapanmadi.");
         }
     }
 }
@@ -351,27 +279,27 @@ async fn abort_active_backup(
 async fn initiate_backup_transaction(
     backup_phase: &mut BackupPhase,
     child_stdin: &mut Option<ChildStdin>,
-    save_ev_rx: &mut mpsc::UnboundedReceiver<PurpurSaveEvent>,
-    child_generation: u64,
-    flush_wait_ms: u64,
-    label: &str,
+    config: &BackupConfig,
 ) {
-    // R3: Drain any stale stdout save events queued before this transaction starts
-    while save_ev_rx.try_recv().is_ok() {}
-
-    println!(
-        "[SpicaBackup] {} dunya yedegi baslatiliyor (save-off onayi -> save-all flush -> Purpur onayi -> tar.gz -> save-on)...",
-        label
-    );
-    if let Err(err) = send_to_child(child_stdin, "save-off").await {
-        eprintln!("[SpicaBackup] HATA: save-off gonderilemedi: {}", err);
+    if config.snapshot_command.is_empty() {
+        eprintln!("[SpicaBackup] HATA: Canli yedek icin backup.snapshot_command gerekli.");
+        return;
+    }
+    let id = generate_auth_token();
+    if let Err(err) = send_to_child(
+        child_stdin,
+        &format!("spicarustnative:spicabackupcheckpoint {id}"),
+    )
+    .await
+    {
+        eprintln!("[SpicaBackup] HATA: Kayit noktasi istegi gonderilemedi: {err}");
         return;
     }
 
-    *backup_phase = BackupPhase::WaitingSaveOff {
-        generation: child_generation,
-        deadline: tokio::time::Instant::now() + Duration::from_secs(SAVE_OFF_ACK_TIMEOUT_SECS),
-        flush_wait_ms,
+    *backup_phase = BackupPhase::WaitingCheckpoint {
+        id,
+        deadline: tokio::time::Instant::now()
+            + Duration::from_millis(config.flush_wait_ms.max(MIN_FLUSH_ACK_TIMEOUT_MS)),
     };
 }
 
@@ -379,7 +307,7 @@ fn print_supervisor_help() {
     println!("================ Spica Supervisor Komutlari ================");
     println!("  :brain    -> Canli Rust Brain durumu, EWMA MSPT ve direktif");
     println!("  :stats    -> Host CPU/RAM, JVM Heap, TPS ve varlik ozeti");
-    println!("  :backup   -> Zero-JVM-Overhead Rust dunya yedegi (.tar.gz)");
+    println!("  :backup   -> Dunya snapshot'ini .tar.gz olarak yedekler");
     println!("  :restart  -> Purpur'a 'stop' gonderir ve temiz yeniden baslatir");
     println!("  :stop     -> Purpur'a 'stop' gonderir ve launcher'dan cikar");
     println!("  :help     -> Bu yardim mesajini gosterir");
@@ -478,7 +406,7 @@ fn print_stats(brain: &Arc<Mutex<BrainState>>) {
 }
 
 /// Runs the Purpur child process lifecycle loop with piped console, interactive `:` commands,
-/// 4-stage flush-verified cancellable world backups, graceful Ctrl+C handling, and crash recovery.
+/// checkpoint-verified snapshot backups, graceful Ctrl+C handling, and crash recovery.
 pub async fn run_supervisor(
     cfg: &LauncherConfig,
     plan: &JvmPlan,
@@ -488,6 +416,9 @@ pub async fn run_supervisor(
     let mut stdin_rx = spawn_stdin_reader();
     let mut stdin_open = true;
     let mut restart_count: u32 = 0;
+    if cfg.backup.enabled && cfg.backup.snapshot_command.is_empty() {
+        eprintln!("[SpicaBackup] Zamanlanmis canli yedek icin backup.snapshot_command gerekli.");
+    }
     let mut child_generation: u64 = 0;
 
     loop {
@@ -517,7 +448,7 @@ pub async fn run_supervisor(
                 )
             })?;
 
-        let (save_ev_tx, mut save_ev_rx) = mpsc::unbounded_channel::<PurpurSaveEvent>();
+        let (save_ev_tx, mut save_ev_rx) = mpsc::unbounded_channel::<CheckpointEvent>();
         let mut child_stdin = child.stdin.take();
         let stdout_handle = child
             .stdout
@@ -532,7 +463,9 @@ pub async fn run_supervisor(
         let mut requested_action = SupervisorAction::None;
         let mut force_kill_deadline: Option<tokio::time::Instant> = None;
         let mut backup_phase = BackupPhase::Idle;
-        let mut scheduled_backup_timer = if cfg.backup.enabled {
+        let mut scheduled_backup_timer = if cfg.backup.enabled
+            && !cfg.backup.snapshot_command.is_empty()
+        {
             let interval = Duration::from_secs(cfg.backup.interval_minutes.max(1) * 60);
             let mut t = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
             t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -544,9 +477,7 @@ pub async fn run_supervisor(
         let exit_result = loop {
             let current_deadline = force_kill_deadline;
             let phase_deadline = match &backup_phase {
-                BackupPhase::WaitingSaveOff { deadline, .. }
-                | BackupPhase::WaitingFlush { deadline, .. }
-                | BackupPhase::WaitingSaveOn { deadline, .. } => Some(*deadline),
+                BackupPhase::WaitingCheckpoint { deadline, .. } => Some(*deadline),
                 _ => None,
             };
             let is_archiving = matches!(backup_phase, BackupPhase::Archiving { .. });
@@ -556,97 +487,28 @@ pub async fn run_supervisor(
                 status = child.wait() => {
                     break status;
                 }
-                Some(save_ev) = save_ev_rx.recv() => {
-                    match (save_ev, &backup_phase) {
-                        (
-                            PurpurSaveEvent::SaveOffDisabledNow | PurpurSaveEvent::SaveOffAlreadyOff,
-                            BackupPhase::WaitingSaveOff { generation, flush_wait_ms, .. },
-                        ) if *generation == child_generation && requested_action == SupervisorAction::None => {
-                            let fw = *flush_wait_ms;
-                            let should_restore_save_on =
-                                matches!(save_ev, PurpurSaveEvent::SaveOffDisabledNow);
-                            if !should_restore_save_on {
-                                println!(
-                                    "[SpicaBackup] Not: Purpur otomatik kayit zaten kapaliydi; yedek bitiminde save-off durumu korunacak."
-                                );
-                            }
-                            // R3: Drain any stale prior SaveAllFlushed events right before sending save-all flush
-                            while save_ev_rx.try_recv().is_ok() {}
-                            if let Err(err) = send_to_child(&mut child_stdin, "save-all flush").await {
-                                eprintln!("[SpicaBackup] HATA: save-all flush gonderilemedi: {}", err);
-                                if should_restore_save_on {
-                                    match send_to_child(&mut child_stdin, "save-on").await {
-                                        Ok(()) => {
-                                            backup_phase = BackupPhase::WaitingSaveOn {
-                                                generation: child_generation,
-                                                deadline: tokio::time::Instant::now()
-                                                    + Duration::from_secs(SAVE_ON_ACK_TIMEOUT_SECS),
-                                            };
-                                        }
-                                        Err(save_on_err) => {
-                                            backup_phase = BackupPhase::Idle;
-                                            eprintln!(
-                                                "[SpicaBackup] KRITIK UYARI: flush hatasi sonrasi 'save-on' gonderilemedi: {}",
-                                                save_on_err
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    backup_phase = BackupPhase::Idle;
-                                }
-                            } else {
-                                let timeout_ms = fw.max(MIN_FLUSH_ACK_TIMEOUT_MS);
-                                backup_phase = BackupPhase::WaitingFlush {
-                                    generation: child_generation,
-                                    deadline: tokio::time::Instant::now() + Duration::from_millis(timeout_ms),
-                                    restore_save_on: should_restore_save_on,
-                                };
-                            }
-                        }
-                        (
-                            PurpurSaveEvent::SaveAllFlushed,
-                            BackupPhase::WaitingFlush {
-                                generation,
-                                restore_save_on,
-                                ..
-                            },
-                        ) if *generation == child_generation && requested_action == SupervisorAction::None => {
-                            let should_restore_save_on = *restore_save_on;
-                            println!("[SpicaBackup] Purpur 'Saved the game' onayi alindi. Rust tar.gz arsivleme basliyor...");
-                            let cancel_gate = Arc::new(BackupCancelGate::new());
-                            let cancel_worker = Arc::clone(&cancel_gate);
-                            let (tx, rx) = oneshot::channel();
-                            let work_dir_clone = plan.work_dir.clone();
-                            let backup_cfg_clone = cfg.backup.clone();
-                            tokio::spawn(async move {
-                                let res = match tokio::task::spawn_blocking(move || {
-                                    create_world_backup_cancellable(
-                                        &work_dir_clone,
-                                        &backup_cfg_clone,
-                                        &cancel_worker,
-                                    )
-                                })
-                                .await
-                                {
-                                    Ok(r) => r,
-                                    Err(e) => Err(format!("Yedekleme thread hatasi: {}", e)),
-                                };
-                                let _ = tx.send(res);
-                            });
-                            backup_phase = BackupPhase::Archiving {
-                                generation: child_generation,
-                                restore_save_on: should_restore_save_on,
-                                cancel_gate,
-                                rx,
-                            };
-                        }
-                        (PurpurSaveEvent::SaveOnAck, BackupPhase::WaitingSaveOn { generation, .. })
-                            if *generation == child_generation =>
-                        {
+                Some(event) = save_ev_rx.recv() => {
+                    if matches!(&backup_phase, BackupPhase::WaitingCheckpoint { id, deadline }
+                        if *id == event.id && tokio::time::Instant::now() < *deadline)
+                        && requested_action == SupervisorAction::None
+                    {
+                        if !event.saved {
                             backup_phase = BackupPhase::Idle;
-                            println!("[SpicaBackup] Purpur otomatik kayit (save-on) onaylandi.");
+                            eprintln!("[SpicaBackup] HATA: Purpur kayit noktasi basarisiz.");
+                            continue;
                         }
-                        _ => {}
+                        let cancel_gate = Arc::new(BackupCancelGate::new());
+                        let worker_gate = Arc::clone(&cancel_gate);
+                        let (tx, rx) = oneshot::channel();
+                        let work_dir = plan.work_dir.clone();
+                        let config = cfg.backup.clone();
+                        tokio::spawn(async move {
+                            let result = create_snapshot_backup(
+                                &work_dir, &config, &event.id, worker_gate,
+                            ).await;
+                            let _ = tx.send(result);
+                        });
+                        backup_phase = BackupPhase::Archiving { cancel_gate, rx };
                     }
                 }
                 _ = async move {
@@ -654,63 +516,8 @@ pub async fn run_supervisor(
                         tokio::time::sleep_until(dl).await;
                     }
                 }, if phase_deadline.is_some() => {
-                    let timed_out = std::mem::replace(&mut backup_phase, BackupPhase::Idle);
-                    match timed_out {
-                        BackupPhase::WaitingSaveOff { .. } => {
-                            eprintln!(
-                                "[SpicaBackup] HATA: Purpur 'save-off' onayi {} sn icinde gelmedi; yedekleme iptal edildi (save-on gonderiliyor).",
-                                SAVE_OFF_ACK_TIMEOUT_SECS
-                            );
-                            match send_to_child(&mut child_stdin, "save-on").await {
-                                Ok(()) => {
-                                    backup_phase = BackupPhase::WaitingSaveOn {
-                                        generation: child_generation,
-                                        deadline: tokio::time::Instant::now()
-                                            + Duration::from_secs(SAVE_ON_ACK_TIMEOUT_SECS),
-                                    };
-                                }
-                                Err(err) => {
-                                    eprintln!(
-                                        "[SpicaBackup] KRITIK UYARI: save-off zaman asimi sonrasi 'save-on' gonderilemedi: {}",
-                                        err
-                                    );
-                                }
-                            }
-                        }
-                        BackupPhase::WaitingFlush { restore_save_on, .. } => {
-                            if restore_save_on {
-                                eprintln!(
-                                    "[SpicaBackup] HATA: Purpur 'Saved the game' onayi zaman asimina ugradi; tutarsiz yedek olusturulmamasi icin iptal edildi (save-on geri aciliyor)."
-                                );
-                                match send_to_child(&mut child_stdin, "save-on").await {
-                                    Ok(()) => {
-                                        backup_phase = BackupPhase::WaitingSaveOn {
-                                            generation: child_generation,
-                                            deadline: tokio::time::Instant::now()
-                                                + Duration::from_secs(SAVE_ON_ACK_TIMEOUT_SECS),
-                                        };
-                                    }
-                                    Err(err) => {
-                                        eprintln!(
-                                            "[SpicaBackup] KRITIK UYARI: flush zaman asimi sonrasi 'save-on' gonderilemedi: {}",
-                                            err
-                                        );
-                                    }
-                                }
-                            } else {
-                                eprintln!(
-                                    "[SpicaBackup] HATA: Purpur 'Saved the game' onayi zaman asimina ugradi; yedekleme iptal edildi (onceki save-off korundu)."
-                                );
-                            }
-                        }
-                        BackupPhase::WaitingSaveOn { .. } => {
-                            eprintln!(
-                                "[SpicaBackup] UYARI: Purpur 'save-on' onayi {} sn icinde gorulmedi; manuel 'save-on' kontrol edin.",
-                                SAVE_ON_ACK_TIMEOUT_SECS
-                            );
-                        }
-                        _ => {}
-                    }
+                    backup_phase = BackupPhase::Idle;
+                    eprintln!("[SpicaBackup] HATA: Purpur kayit noktasi onayi zaman asimina ugradi.");
                 }
                 backup_res = async {
                     match &mut backup_phase {
@@ -718,76 +525,28 @@ pub async fn run_supervisor(
                         _ => std::future::pending().await,
                     }
                 }, if is_archiving => {
-                    let (completed_gen, should_restore_save_on) =
-                        match std::mem::replace(&mut backup_phase, BackupPhase::Idle) {
-                            BackupPhase::Archiving {
-                                generation,
-                                restore_save_on,
-                                ..
-                            } => (generation, restore_save_on),
-                            _ => (0, false),
-                        };
-                    // R4: Restore save-on ONLY if Spica actually turned it off (preserve prior admin save-off)
-                    if should_restore_save_on {
-                        match send_to_child(&mut child_stdin, "save-on").await {
-                            Ok(()) => {
-                                if completed_gen == child_generation
-                                    && requested_action == SupervisorAction::None
-                                {
-                                    backup_phase = BackupPhase::WaitingSaveOn {
-                                        generation: child_generation,
-                                        deadline: tokio::time::Instant::now()
-                                            + Duration::from_secs(SAVE_ON_ACK_TIMEOUT_SECS),
-                                    };
-                                }
+                    backup_phase = BackupPhase::Idle;
+                    match backup_res {
+                        Ok(Ok(outcome)) => {
+                            let size_mb = outcome.size_bytes as f64 / (1024.0 * 1024.0);
+                            match brain.lock() {
+                                Ok(mut guard) => guard.record_backup(outcome.duration_ms, outcome.size_bytes),
+                                Err(poisoned) => poisoned
+                                    .into_inner()
+                                    .record_backup(outcome.duration_ms, outcome.size_bytes),
                             }
-                            Err(err) => {
-                                eprintln!(
-                                    "[SpicaBackup] KRITIK UYARI: Yedek sonrasi 'save-on' gonderilemedi: {}",
-                                    err
-                                );
-                            }
+                            println!(
+                                "[SpicaBackup] Tamamlandi: {} ({:.2} MB | {} dosya | {} ms | dunyalar={:?} | silinen eski={})",
+                                outcome.archive_path.display(),
+                                size_mb,
+                                outcome.files_archived,
+                                outcome.duration_ms,
+                                outcome.worlds_included,
+                                outcome.rotated_deleted
+                            );
                         }
-                    } else {
-                        println!(
-                            "[SpicaBackup] Yedek oncesi otomatik kayit kapali oldugu icin 'save-off' durumu korundu."
-                        );
-                    }
-
-                    if completed_gen == child_generation && requested_action == SupervisorAction::None {
-                        match backup_res {
-                            Ok(Ok(outcome)) => {
-                                let size_mb = outcome.size_bytes as f64 / (1024.0 * 1024.0);
-                                match brain.lock() {
-                                    Ok(mut guard) => guard.record_backup(outcome.duration_ms, outcome.size_bytes),
-                                    Err(poisoned) => poisoned
-                                        .into_inner()
-                                        .record_backup(outcome.duration_ms, outcome.size_bytes),
-                                }
-                                println!(
-                                    "[SpicaBackup] Tamamlandi: {} ({:.2} MB | {} dosya | {} ms | dunyalar={:?} | silinen eski={})",
-                                    outcome.archive_path.display(),
-                                    size_mb,
-                                    outcome.files_archived,
-                                    outcome.duration_ms,
-                                    outcome.worlds_included,
-                                    outcome.rotated_deleted
-                                );
-                            }
-                            Ok(Err(err)) => {
-                                eprintln!(
-                                    "[SpicaBackup] HATA ({}): {}",
-                                    if should_restore_save_on { "save-on geri acildi" } else { "onceki save-off korundu" },
-                                    err
-                                );
-                            }
-                            Err(_) => {
-                                eprintln!(
-                                    "[SpicaBackup] HATA: Yedekleme gorevi beklenmedik sekilde iptal oldu ({}).",
-                                    if should_restore_save_on { "save-on geri acildi" } else { "onceki save-off korundu" }
-                                );
-                            }
-                        }
+                        Ok(Err(err)) => eprintln!("[SpicaBackup] HATA: {err}"),
+                        Err(_) => eprintln!("[SpicaBackup] HATA: Yedek islemi beklenmedik sekilde kapandi."),
                     }
                 }
                 _ = async {
@@ -801,10 +560,7 @@ pub async fn run_supervisor(
                     initiate_backup_transaction(
                         &mut backup_phase,
                         &mut child_stdin,
-                        &mut save_ev_rx,
-                        child_generation,
-                        cfg.backup.flush_wait_ms,
-                        "Zamanlanmis",
+                        &cfg.backup,
                     )
                     .await;
                 }
@@ -829,16 +585,13 @@ pub async fn run_supervisor(
                                             initiate_backup_transaction(
                                                 &mut backup_phase,
                                                 &mut child_stdin,
-                                                &mut save_ev_rx,
-                                                child_generation,
-                                                cfg.backup.flush_wait_ms,
-                                                "Manuel",
+                                                &cfg.backup,
                                             )
                                             .await;
                                         }
                                     }
                                     ":restart" => {
-                                        abort_active_backup(&mut backup_phase, &mut child_stdin, true).await;
+                                        abort_active_backup(&mut backup_phase).await;
                                         requested_action = SupervisorAction::Restart;
                                         println!("[SpicaSupervisor] Purpur guvenli yeniden baslatiliyor ('stop' gonderiliyor)...");
                                         let _ = send_to_child(&mut child_stdin, "stop").await;
@@ -848,7 +601,7 @@ pub async fn run_supervisor(
                                         );
                                     }
                                     ":stop" => {
-                                        abort_active_backup(&mut backup_phase, &mut child_stdin, true).await;
+                                        abort_active_backup(&mut backup_phase).await;
                                         requested_action = SupervisorAction::Stop;
                                         println!("[SpicaSupervisor] Purpur ve Spica Launcher durduruluyor ('stop' gonderiliyor)...");
                                         let _ = send_to_child(&mut child_stdin, "stop").await;
@@ -868,7 +621,7 @@ pub async fn run_supervisor(
                                 let base_cmd = normalize_console_command(trimmed);
                                 if base_cmd == "stop" || base_cmd == "restart" {
                                     // Abort active backup cleanly before forwarding raw stop/restart to Purpur
-                                    abort_active_backup(&mut backup_phase, &mut child_stdin, true).await;
+                                    abort_active_backup(&mut backup_phase).await;
                                     if base_cmd == "stop" {
                                         requested_action = SupervisorAction::Stop;
                                         force_kill_deadline = Some(
@@ -877,13 +630,6 @@ pub async fn run_supervisor(
                                         );
                                     }
                                     let _ = send_to_child(&mut child_stdin, &line).await;
-                                } else if backup_phase.blocks_save_commands()
-                                    && matches!(base_cmd.as_str(), "save-on" | "save-off" | "save-all" | "reload")
-                                {
-                                    println!(
-                                        "[SpicaBackup] Aktif yedekleme devam ederken '{}' komutu snapshot tutarliligi icin engellendi.",
-                                        trimmed
-                                    );
                                 } else {
                                     let _ = send_to_child(&mut child_stdin, &line).await;
                                 }
@@ -895,10 +641,10 @@ pub async fn run_supervisor(
                     if ctrl_c_res.is_ok() {
                         if requested_action == SupervisorAction::Stop {
                             eprintln!("[SpicaSupervisor] Ikinci Ctrl+C alindi, Purpur zorla sonlandiriliyor...");
-                            abort_active_backup(&mut backup_phase, &mut child_stdin, false).await;
+                            abort_active_backup(&mut backup_phase).await;
                             let _ = child.kill().await;
                         } else {
-                            abort_active_backup(&mut backup_phase, &mut child_stdin, true).await;
+                            abort_active_backup(&mut backup_phase).await;
                             requested_action = SupervisorAction::Stop;
                             println!("[SpicaSupervisor] Ctrl+C alindi. Purpur guvenli kapatiliyor ('stop' gonderiliyor)...");
                             let _ = send_to_child(&mut child_stdin, "stop").await;
@@ -918,7 +664,7 @@ pub async fn run_supervisor(
                         "[SpicaSupervisor] Purpur {} sn icinde kapanmadi, surec zorla sonlandiriliyor...",
                         GRACEFUL_STOP_TIMEOUT_SECS
                     );
-                    abort_active_backup(&mut backup_phase, &mut child_stdin, false).await;
+                    abort_active_backup(&mut backup_phase).await;
                     let _ = child.kill().await;
                     force_kill_deadline = None;
                 }
@@ -926,7 +672,7 @@ pub async fn run_supervisor(
         };
 
         // Ensure any in-flight backup for this exited child generation is cancelled & drained before cleanup/restart
-        abort_active_backup(&mut backup_phase, &mut child_stdin, false).await;
+        abort_active_backup(&mut backup_phase).await;
 
         // Close stdin pipe and drain remaining child output cleanly
         drop(child_stdin);
@@ -1059,42 +805,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_detect_save_event_matches_purpur_and_rejects_player_chat_spoof() {
+    fn checkpoint_event_requires_plugin_prefix_and_id() {
+        let id = "a".repeat(64);
+        let valid = format!("[15:20:01 INFO]: [SpicaRustNative] SpicaBackup checkpoint {id} saved");
         assert_eq!(
-            detect_save_event("[15:20:01 INFO]: Saved the game"),
-            Some(PurpurSaveEvent::SaveAllFlushed)
+            detect_checkpoint_event(&valid),
+            Some(CheckpointEvent {
+                id: id.clone(),
+                saved: true
+            })
+        );
+        let failed = format!(
+            "[15:20:01] [Server thread/INFO]: [SpicaRustNative] SpicaBackup checkpoint {id} failed"
         );
         assert_eq!(
-            detect_save_event("[15:20:01] [Server thread/INFO]: Saved the game"),
-            Some(PurpurSaveEvent::SaveAllFlushed)
+            detect_checkpoint_event(&failed),
+            Some(CheckpointEvent {
+                id: id.clone(),
+                saved: false
+            })
         );
         assert_eq!(
-            detect_save_event("\x1b[32m[15:20:01 INFO]: Automatic saving is now disabled\x1b[0m"),
-            Some(PurpurSaveEvent::SaveOffDisabledNow)
-        );
-        assert_eq!(
-            detect_save_event("[15:20:01 INFO]: Saving is already turned off"),
-            Some(PurpurSaveEvent::SaveOffAlreadyOff)
-        );
-        assert_eq!(
-            detect_save_event("[15:20:02 INFO]: Automatic saving is now enabled"),
-            Some(PurpurSaveEvent::SaveOnAck)
-        );
-        // Player chat and WARN/plugin stdout spoofing must NEVER match
-        assert_eq!(
-            detect_save_event("[15:20:01 INFO]: <Griefer> Saved the game"),
+            detect_checkpoint_event("[15:20:01 INFO]: Saved the game"),
             None
         );
         assert_eq!(
-            detect_save_event("[15:20:01 WARN]: fake INFO]: Saved the game"),
+            detect_checkpoint_event(&valid.replace("INFO]: ", "INFO]: <Player> ")),
             None
         );
         assert_eq!(
-            detect_save_event("raw plugin stdout INFO]: Saved the game"),
-            None
-        );
-        assert_eq!(
-            detect_save_event("[15:20:01 INFO]: [Not Secure] <Bob> Automatic saving is now disabled"),
+            detect_checkpoint_event(&valid.replace(&id, "invalid")),
             None
         );
     }

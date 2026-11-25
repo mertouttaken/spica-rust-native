@@ -4,9 +4,14 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
+use std::sync::{
+    atomic::{AtomicU64, AtomicU8, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::process::Command;
 use walkdir::WalkDir;
 
 const BACKUP_PREFIX: &str = "spica-backup-";
@@ -99,10 +104,7 @@ impl<'a> Read for CancellableFileReader<'a> {
         if self.cancel_gate.is_cancelled() {
             // R2 CRITICAL: MUST NOT return ErrorKind::Interrupted because std::io::copy
             // (used inside tar::Builder::append_data and GZIP drain) retries Interrupted forever!
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                BACKUP_CANCELLED_ERR,
-            ));
+            return Err(io::Error::new(io::ErrorKind::Other, BACKUP_CANCELLED_ERR));
         }
         self.inner.read(buf)
     }
@@ -143,6 +145,187 @@ fn resolve_backup_dir(work_dir: &Path, backup_dir: &str) -> PathBuf {
     } else {
         work_dir.join(p)
     }
+}
+
+fn snapshot_worlds(work_dir: &Path, cfg: &BackupConfig) -> Result<Vec<String>, String> {
+    let mut worlds = Vec::new();
+    for world in &cfg.worlds {
+        let name = world.trim();
+        let path = Path::new(name);
+        if name.is_empty()
+            || !path
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+        {
+            return Err(format!("Snapshot dunya yolu goreli olmalidir: {world}"));
+        }
+        if work_dir.join(path).is_dir() {
+            if !worlds.iter().any(|previous| previous == name) {
+                worlds.push(name.to_string());
+            }
+        } else if cfg.require_all_worlds {
+            return Err(format!("Snapshot icin gerekli dunya eksik: {name}"));
+        }
+    }
+    if worlds.is_empty() {
+        return Err("Snapshot icin dunya dizini bulunamadi.".into());
+    }
+    Ok(worlds)
+}
+
+fn validate_snapshot(
+    work_dir: &Path,
+    snapshot_dir: &Path,
+    worlds: &[String],
+) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(snapshot_dir)
+        .map_err(|err| format!("Snapshot dizini acilamadi: {err}"))?;
+    for name in worlds {
+        let live = fs::canonicalize(work_dir.join(name))
+            .map_err(|err| format!("Canli dunya dogrulanamadi ({name}): {err}"))?;
+        let saved = fs::canonicalize(root.join(name))
+            .map_err(|err| format!("Snapshot dunyasi eksik ({name}): {err}"))?;
+        if !saved.is_dir()
+            || saved == root
+            || !saved.starts_with(&root)
+            || saved.starts_with(&live)
+            || live.starts_with(&saved)
+        {
+            return Err(format!("Snapshot dunyasi ayri bir kaynak degil: {name}"));
+        }
+        if !saved.join("level.dat").is_file() {
+            return Err(format!("Snapshot dunyasinda level.dat eksik: {name}"));
+        }
+        for entry in WalkDir::new(&saved).follow_links(false) {
+            let entry = entry.map_err(|err| format!("Snapshot taranamadi ({name}): {err}"))?;
+            if entry.file_type().is_symlink() {
+                return Err(format!(
+                    "Snapshot kaynakta sembolik baglanti var: {}",
+                    entry.path().display()
+                ));
+            }
+        }
+    }
+    Ok(root)
+}
+
+async fn snapshot_provider(
+    command: &[String],
+    operation: &str,
+    source: &Path,
+    snapshot: &Path,
+    worlds: &[String],
+) -> Result<(), String> {
+    let (program, args) = command
+        .split_first()
+        .ok_or("Canli yedek icin backup.snapshot_command gerekli.")?;
+    let mut child = Command::new(program)
+        .args(args)
+        .arg(operation)
+        .arg(source)
+        .arg(snapshot)
+        .args(worlds)
+        .current_dir(source)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|err| format!("Snapshot saglayici ({operation}) baslatilamadi: {err}"))?;
+    match tokio::time::timeout(Duration::from_secs(60), child.wait()).await {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(status)) => Err(format!(
+            "Snapshot saglayici ({operation}) basarisiz: {status}"
+        )),
+        Ok(Err(err)) => Err(format!(
+            "Snapshot saglayici ({operation}) beklenemedi: {err}"
+        )),
+        Err(_) => {
+            let _ = child.kill().await;
+            Err(format!(
+                "Snapshot saglayici ({operation}) zaman asimina ugradi."
+            ))
+        }
+    }
+}
+
+/// The provider owns the immutable point-in-time view. The archive worker only reads that view.
+pub async fn create_snapshot_backup(
+    work_dir: &Path,
+    config: &BackupConfig,
+    checkpoint_id: &str,
+    cancel_gate: Arc<BackupCancelGate>,
+) -> Result<BackupOutcome, String> {
+    if config.snapshot_command.is_empty() {
+        return Err("Canli yedek icin backup.snapshot_command gerekli.".into());
+    }
+    let work_dir = fs::canonicalize(work_dir).map_err(|err| err.to_string())?;
+    let worlds = snapshot_worlds(&work_dir, config)?;
+    let backup_dir = resolve_backup_dir(&work_dir, &config.backup_dir);
+    fs::create_dir_all(&backup_dir).map_err(|err| err.to_string())?;
+    let backup_dir = fs::canonicalize(backup_dir).map_err(|err| err.to_string())?;
+    let snapshot_dir = backup_dir.join(format!(".spica-snapshot-{checkpoint_id}"));
+    for world in &worlds {
+        let live = fs::canonicalize(work_dir.join(world)).map_err(|err| err.to_string())?;
+        if backup_dir.starts_with(&live) {
+            return Err(format!("backup_dir canli dunya dizininde olamaz: {world}"));
+        }
+    }
+    fs::create_dir(&snapshot_dir).map_err(|err| err.to_string())?;
+
+    let capture = snapshot_provider(
+        &config.snapshot_command,
+        "create",
+        &work_dir,
+        &snapshot_dir,
+        &worlds,
+    );
+    let cancelled = async {
+        while !cancel_gate.is_cancelled() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Err(BACKUP_CANCELLED_ERR.to_string())
+    };
+    let result = match tokio::select! { result = capture => result, result = cancelled => result } {
+        Ok(()) if !cancel_gate.is_cancelled() => {
+            let mut archive_cfg = config.clone();
+            archive_cfg.backup_dir = backup_dir.to_string_lossy().into_owned();
+            archive_cfg.worlds = worlds.clone();
+            archive_cfg.require_all_worlds = true;
+            let live = work_dir.clone();
+            let mounted = snapshot_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                let snapshot =
+                    validate_snapshot(&live, &mounted.join("view"), &archive_cfg.worlds)?;
+                create_world_backup_cancellable(&snapshot, &archive_cfg, &cancel_gate)
+            })
+            .await
+            .unwrap_or_else(|err| Err(format!("Snapshot arsivleme gorevi basarisiz: {err}")))
+        }
+        Ok(()) => Err(BACKUP_CANCELLED_ERR.to_string()),
+        Err(err) => Err(err),
+    };
+
+    let release = snapshot_provider(
+        &config.snapshot_command,
+        "release",
+        &work_dir,
+        &snapshot_dir,
+        &worlds,
+    )
+    .await;
+    if let Err(err) = release {
+        eprintln!(
+            "[SpicaBackup] Snapshot temizlenemedi ({}): {err}",
+            snapshot_dir.display()
+        );
+    } else if let Err(err) = fs::remove_dir(&snapshot_dir) {
+        if err.kind() != io::ErrorKind::NotFound {
+            eprintln!(
+                "[SpicaBackup] Snapshot dizini silinemedi ({}): {err}",
+                snapshot_dir.display()
+            );
+        }
+    }
+    result
 }
 
 fn is_session_lock(path: &Path) -> bool {
@@ -351,13 +534,8 @@ pub fn create_world_backup_cancellable(
                 })?;
                 let archive_rel = Path::new(world_name).join(rel);
 
-                let src_file = File::open(entry_path).map_err(|e| {
-                    format!(
-                        "Dosya acilamadi ({}): {}",
-                        entry_path.display(),
-                        e
-                    )
-                })?;
+                let src_file = File::open(entry_path)
+                    .map_err(|e| format!("Dosya acilamadi ({}): {}", entry_path.display(), e))?;
                 let meta = src_file.metadata().map_err(|e| {
                     format!(
                         "Dosya metadatasi okunamadi ({}): {}",
@@ -567,6 +745,7 @@ mod tests {
             require_all_worlds: false,
             compression_level: 3,
             flush_wait_ms: 500,
+            snapshot_command: Vec::new(),
         };
 
         let outcome = create_world_backup(&work_dir, &cfg).expect("backup should succeed");
@@ -581,7 +760,11 @@ mod tests {
         let mut names = Vec::new();
         for entry in archive.entries().expect("read entries") {
             let e = entry.expect("valid entry");
-            let p = e.path().expect("entry path").to_string_lossy().replace('\\', "/");
+            let p = e
+                .path()
+                .expect("entry path")
+                .to_string_lossy()
+                .replace('\\', "/");
             names.push(p);
         }
         assert!(names.contains(&"world/level.dat".to_string()));
@@ -638,6 +821,7 @@ mod tests {
             require_all_worlds: false,
             compression_level: 1,
             flush_wait_ms: 500,
+            snapshot_command: Vec::new(),
         };
 
         let first = create_world_backup(&work_dir, &cfg).expect("first backup");
@@ -677,6 +861,7 @@ mod tests {
             require_all_worlds: false,
             compression_level: 3,
             flush_wait_ms: 500,
+            snapshot_command: Vec::new(),
         };
 
         let gate = BackupCancelGate::new();
@@ -692,7 +877,10 @@ mod tests {
             .unwrap()
             .flatten()
             .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
-        assert!(!has_tmp, "Cancelled backup must leave zero .tmp files behind");
+        assert!(
+            !has_tmp,
+            "Cancelled backup must leave zero .tmp files behind"
+        );
 
         let _ = fs::remove_dir_all(&work_dir);
     }
@@ -713,6 +901,7 @@ mod tests {
             require_all_worlds: false,
             compression_level: 3,
             flush_wait_ms: 500,
+            snapshot_command: Vec::new(),
         };
         let res = create_world_backup(&work_dir, &nested_cfg);
         assert!(res.is_err());
@@ -727,6 +916,7 @@ mod tests {
             require_all_worlds: true,
             compression_level: 3,
             flush_wait_ms: 500,
+            snapshot_command: Vec::new(),
         };
         let res_strict = create_world_backup(&work_dir, &strict_cfg);
         assert!(res_strict.is_err());
@@ -757,7 +947,10 @@ mod tests {
 
         let started = Instant::now();
         let copy_res = io::copy(&mut reader, &mut io::sink());
-        assert!(copy_res.is_err(), "Mid-read cancel MUST error out of std::io::copy");
+        assert!(
+            copy_res.is_err(),
+            "Mid-read cancel MUST error out of std::io::copy"
+        );
         assert_eq!(copy_res.unwrap_err().kind(), io::ErrorKind::Other);
         assert!(
             started.elapsed().as_millis() < 250,
@@ -765,5 +958,47 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
+    fn archives_validated_snapshot_bytes_instead_of_live_world() {
+        let root = make_temp_dir("snapshot-source");
+        let live = root.join("live");
+        let mounted = root.join("snapshot");
+        fs::create_dir_all(live.join("world")).unwrap();
+        fs::create_dir_all(mounted.join("world")).unwrap();
+        fs::write(live.join("world/level.dat"), b"new live state").unwrap();
+        fs::write(mounted.join("world/level.dat"), b"snapshot checkpoint").unwrap();
+        let config = BackupConfig {
+            backup_dir: root.join("backups").to_string_lossy().into_owned(),
+            worlds: vec!["world".into()],
+            ..BackupConfig::default()
+        };
+        let worlds = snapshot_worlds(&live, &config).unwrap();
+        assert!(validate_snapshot(&live, &live, &worlds).is_err());
+        let snapshot = validate_snapshot(&live, &mounted, &worlds).unwrap();
+        let result = create_world_backup(&snapshot, &config).unwrap();
+        let mut archive =
+            tar::Archive::new(GzDecoder::new(File::open(result.archive_path).unwrap()));
+        let mut entry = archive.entries().unwrap().next().unwrap().unwrap();
+        let mut payload = Vec::new();
+        entry.read_to_end(&mut payload).unwrap();
+        assert_eq!(payload, b"snapshot checkpoint");
+    }
+
+    #[tokio::test]
+    async fn live_backup_fails_closed_without_a_snapshot_provider() {
+        let root = make_temp_dir("no-snapshot-provider");
+        let config = BackupConfig::default();
+        let error = create_snapshot_backup(
+            &root,
+            &config,
+            &"a".repeat(64),
+            Arc::new(BackupCancelGate::new()),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("snapshot_command"));
+        assert!(!root.join("backups").exists());
     }
 }

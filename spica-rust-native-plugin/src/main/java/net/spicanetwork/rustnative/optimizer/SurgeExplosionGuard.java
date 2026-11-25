@@ -257,11 +257,10 @@ public final class SurgeExplosionGuard implements Listener {
                 player.getLocation(scratchLoc);
                 Vector vel = player.getVelocity();
 
-                surgeArena.x.put(i, (float) scratchLoc.getX());
-                surgeArena.y.put(i, (float) scratchLoc.getY());
-                surgeArena.z.put(i, (float) scratchLoc.getZ());
+                surgeArena.setEntityPositionAndFlags(
+                    i, (float) scratchLoc.getX(), (float) scratchLoc.getY(), (float) scratchLoc.getZ(), 1
+                );
                 surgeArena.setEntityVelocity(i, (float) vel.getX(), (float) vel.getY(), (float) vel.getZ());
-                surgeArena.flags.put(i, 1);
             }
 
             long rustStart = System.nanoTime();
@@ -272,14 +271,14 @@ public final class SurgeExplosionGuard implements Listener {
             }
 
             for (int i = 0; i < count; i++) {
-                int action = surgeArena.outIntA.get(i);
+                int action = surgeArena.getOutIntA(i);
                 if (action != RustNative.SURGE_CLAMP_VELOCITY) {
                     continue;
                 }
 
-                float cvx = surgeArena.outX.get(i);
-                float cvy = surgeArena.outY.get(i);
-                float cvz = surgeArena.outZ.get(i);
+                float cvx = surgeArena.getOutX(i);
+                float cvy = surgeArena.getOutY(i);
+                float cvz = surgeArena.getOutZ(i);
                 if (!Float.isFinite(cvx) || !Float.isFinite(cvy) || !Float.isFinite(cvz)) {
                     continue;
                 }

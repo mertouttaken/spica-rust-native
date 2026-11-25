@@ -265,7 +265,7 @@ public final class RedstoneHopperGovernor implements Listener {
         }
 
         long rustStart = System.nanoTime();
-        int nativeThrottled = api.evaluateRedstoneChunks(
+        int nativeThrottled = api.evaluateRedstoneChunksWithExclusiveBuffers(
             chunkCount,
             chunkXBuf,
             chunkZBuf,

@@ -115,6 +115,7 @@ pub struct BackupConfig {
     pub require_all_worlds: bool,
     pub compression_level: u32,
     pub flush_wait_ms: u64,
+    pub snapshot_command: Vec<String>,
 }
 
 impl Default for BackupConfig {
@@ -132,6 +133,7 @@ impl Default for BackupConfig {
             require_all_worlds: true,
             compression_level: 3,
             flush_wait_ms: 15_000,
+            snapshot_command: Vec::new(),
         }
     }
 }
@@ -172,8 +174,8 @@ impl LauncherConfig {
                 })?;
             }
         }
-        let body = toml::to_string_pretty(cfg)
-            .map_err(|e| format!("TOML serilestirme hatasi: {}", e))?;
+        let body =
+            toml::to_string_pretty(cfg).map_err(|e| format!("TOML serilestirme hatasi: {}", e))?;
         let header = "# SpicaRustNative - Rust Startup Orchestrator & Adaptive Brain Daemon\n\
                       # Purpur 1.21.4 Core + Rust Brain (spica-launcher v2.6.0)\n\
                       # min_ram_mb / max_ram_mb = 0 -> otomatik donanim boyutlandirmasi\n\

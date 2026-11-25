@@ -436,10 +436,10 @@ public final class BrainActuator {
         List<HotChunkEntry> entries = new ArrayList<>(safeCount);
         for (int i = 0; i < safeCount; i++) {
             entries.add(new HotChunkEntry(
-                brainArena.chunkX.get(i),
-                brainArena.chunkZ.get(i),
-                brainArena.chunkCount.get(i),
-                brainArena.chunkCrowded.get(i)
+                brainArena.getChunkX(i),
+                brainArena.getChunkZ(i),
+                brainArena.getChunkCount(i),
+                brainArena.getChunkCrowded(i)
             ));
         }
 

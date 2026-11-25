@@ -7,15 +7,19 @@ import net.spicanetwork.rustnative.nativebridge.RustNative;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.util.Locale;
 
 /**
  * Public Developer API registered via Bukkit ServicesManager.
+ *
+ * The ordinary ByteBuffer methods copy caller-owned data into thread-local storage before JNI.
+ * Callers that own every view can choose a WithExclusiveBuffers variant to skip these copies.
+ * Keep inputs and outputs stable for deterministic results and use separate output buffers.
  *
  * Other Purpur/Paper 1.21.4 plugins can retrieve this service via:
  * {@code Bukkit.getServicesManager().load(SpicaRustAPI.class)}
  */
 public final class SpicaRustAPI {
+    private static final ThreadLocal<ByteBuffer[]> NATIVE_COPIES = ThreadLocal.withInitial(() -> new ByteBuffer[15]);
 
     public boolean isNativeLoaded() {
         return NativeLoader.isLoaded();
@@ -26,7 +30,7 @@ public final class SpicaRustAPI {
     }
 
     /**
-     * Allocate a thread-confined zero-copy SoA arena for custom batch workloads.
+     * Allocate an arena that owns its native buffers. Group shared fill/compute/read sequences with withExclusiveAccess.
      */
     public EntityBatchArena createArena(int initialEntities, int initialTargets) {
         return new EntityBatchArena(initialEntities, initialTargets);
@@ -45,18 +49,7 @@ public final class SpicaRustAPI {
         float pushStrength,
         float maxPush
     ) {
-        ensureLoaded();
-        if (entityCount <= 0) {
-            return 0L;
-        }
-        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
-            return RustNative.nativeComputeCollisions(
-                entityCount,
-                arena.xBuf, arena.yBuf, arena.zBuf, arena.radiusBuf,
-                cellSize, pushStrength, maxPush,
-                arena.outXBuf, arena.outYBuf, arena.outZBuf, arena.outIntABuf
-            );
-        }
+        return arena.computeCollisions(entityCount, cellSize, pushStrength, maxPush);
     }
 
     /**
@@ -76,22 +69,7 @@ public final class SpicaRustAPI {
         float fullRange,
         float reducedRange
     ) {
-        ensureLoaded();
-        if (mobCount <= 0) {
-            return 0;
-        }
-        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
-            return RustNative.nativeComputeAiTargets(
-                mobCount,
-                arena.xBuf, arena.yBuf, arena.zBuf,
-                targetCount,
-                arena.targetXBuf, arena.targetYBuf, arena.targetZBuf,
-                fullRange, reducedRange,
-                arena.outIntABuf, arena.outDistSqBuf,
-                arena.outXBuf, arena.outYBuf, arena.outZBuf,
-                arena.outIntBBuf
-            );
-        }
+        return arena.computeAiTargets(mobCount, targetCount, fullRange, reducedRange);
     }
 
     /**
@@ -113,21 +91,10 @@ public final class SpicaRustAPI {
         float goalWeight,
         float maxForce
     ) {
-        ensureLoaded();
-        if (entityCount <= 0) {
-            return 0;
-        }
-        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
-            return RustNative.nativeComputeBoids(
-                entityCount,
-                arena.xBuf, arena.yBuf, arena.zBuf,
-                arena.vxBuf, arena.vyBuf, arena.vzBuf,
-                goalX, goalY, goalZ,
-                perceptionRadius,
-                sepWeight, alignWeight, cohesionWeight, goalWeight, maxForce,
-                arena.outXBuf, arena.outYBuf, arena.outZBuf
-            );
-        }
+        return arena.computeBoidsSteering(
+            entityCount, goalX, goalY, goalZ, perceptionRadius, sepWeight,
+            alignWeight, cohesionWeight, goalWeight, maxForce
+        );
     }
 
     /**
@@ -143,19 +110,7 @@ public final class SpicaRustAPI {
         float radius,
         int maxResults
     ) {
-        ensureLoaded();
-        if (entityCount <= 0 || maxResults <= 0) {
-            return 0;
-        }
-        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
-            return RustNative.nativeQueryRadius(
-                entityCount,
-                arena.xBuf, arena.yBuf, arena.zBuf,
-                qx, qy, qz, radius,
-                Math.min(maxResults, arena.getEntityCapacity()),
-                arena.outIntABuf
-            );
-        }
+        return arena.queryRadius(entityCount, qx, qy, qz, radius, maxResults);
     }
 
     /**
@@ -170,25 +125,7 @@ public final class SpicaRustAPI {
         int entityCount,
         int maxHotChunks
     ) {
-        ensureLoaded();
-        if (entityCount <= 0 || maxHotChunks <= 0) {
-            return 0;
-        }
-        int clampedCount = Math.min(entityCount, arena.getEntityCapacity());
-        int clampedMax = Math.min(maxHotChunks, EntityBatchArena.MAX_HOT_CHUNKS);
-        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
-            return RustNative.nativeAnalyzeChunks(
-                clampedCount,
-                arena.xBuf,
-                arena.zBuf,
-                arena.outIntABuf,
-                clampedMax,
-                arena.chunkXBuf,
-                arena.chunkZBuf,
-                arena.chunkCountBuf,
-                arena.chunkCrowdedBuf
-            );
-        }
+        return arena.analyzeChunks(entityCount, maxHotChunks);
     }
 
     /**
@@ -204,27 +141,7 @@ public final class SpicaRustAPI {
         float mergeRadius,
         int maxPairs
     ) {
-        ensureLoaded();
-        if (itemCount <= 1 || maxStackSize <= 1 || mergeRadius <= 0f || maxPairs <= 0) {
-            return 0;
-        }
-        int clampedItems = Math.min(itemCount, arena.getEntityCapacity());
-        int clampedPairs = Math.min(maxPairs, arena.getEntityCapacity());
-        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
-            return RustNative.nativePlanItemMerges(
-                clampedItems,
-                arena.xBuf,
-                arena.yBuf,
-                arena.zBuf,
-                arena.typeIdBuf,
-                arena.amountBuf,
-                maxStackSize,
-                mergeRadius,
-                clampedPairs,
-                arena.outIntABuf,
-                arena.outIntBBuf
-            );
-        }
+        return arena.planItemMerges(itemCount, maxStackSize, mergeRadius, maxPairs);
     }
 
     /**
@@ -244,101 +161,9 @@ public final class SpicaRustAPI {
         int minSimDist,
         int maxSimDist
     ) {
-        ensureLoaded();
-        int safeMinView = Math.clamp(Math.min(minViewDist, maxViewDist), 2, 32);
-        int safeMaxView = Math.clamp(Math.max(minViewDist, maxViewDist), safeMinView, 32);
-        int safeMinSim = Math.clamp(Math.min(minSimDist, maxSimDist), 2, 32);
-        int safeMaxSim = Math.clamp(Math.max(minSimDist, maxSimDist), safeMinSim, 32);
-
-        float safeCurrentMspt = Float.isFinite(currentMspt) && currentMspt >= 0f ? currentMspt : 0f;
-        float safeEwmaMspt = Float.isFinite(ewmaMspt) && ewmaMspt >= 0f ? ewmaMspt : safeCurrentMspt;
-        float safeBaseFull = Float.isFinite(baseFullRange) && baseFullRange > 0f ? baseFullRange : 32.0f;
-        float safeBaseHib = Float.isFinite(baseHibernateRange) && baseHibernateRange >= safeBaseFull
-            ? baseHibernateRange
-            : Math.max(56.0f, safeBaseFull + 8.0f);
-
-        int ret;
-        int stateCode;
-        int viewDist;
-        int simDist;
-        boolean itemMergeEnabled;
-        float nextEwma;
-        float fullRange;
-        float hibRange;
-        float mergeRadius;
-
-        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
-            ret = RustNative.nativeEvaluateGovernor(
-                safeCurrentMspt,
-                safeEwmaMspt,
-                Math.max(0, loadedEntities),
-                Math.max(0, onlinePlayers),
-                safeBaseFull,
-                safeBaseHib,
-                safeMinView,
-                safeMaxView,
-                safeMinSim,
-                safeMaxSim,
-                arena.govIntBuf,
-                arena.govFloatBuf
-            );
-
-            if (ret < 0) {
-                return BrainDirective.safeDefault(
-                    safeEwmaMspt,
-                    safeMaxView,
-                    safeMaxSim,
-                    safeBaseFull,
-                    safeBaseHib,
-                    "In-process Rust governor fallback error code=" + ret
-                );
-            }
-
-            stateCode = Math.clamp(arena.govInt.get(0), BrainDirective.STATE_GREEN, BrainDirective.STATE_EMERGENCY);
-            viewDist = Math.clamp(arena.govInt.get(1), safeMinView, safeMaxView);
-            simDist = Math.clamp(arena.govInt.get(2), safeMinSim, safeMaxSim);
-            itemMergeEnabled = arena.govInt.get(3) != 0;
-
-            // Slot layout matches Rust jni_bridge.rs / c_abi.rs:
-            // out_floats[0..4] = [full_ai_range, hibernate_range, merge_radius, ewma_mspt]
-            fullRange = arena.govFloat.get(0);
-            hibRange = arena.govFloat.get(1);
-            mergeRadius = arena.govFloat.get(2);
-            nextEwma = arena.govFloat.get(3);
-        }
-
-        if (!Float.isFinite(nextEwma) || nextEwma < 0f) {
-            nextEwma = safeCurrentMspt;
-        }
-        if (!Float.isFinite(fullRange) || fullRange <= 0f) {
-            fullRange = safeBaseFull;
-        }
-        if (!Float.isFinite(hibRange) || hibRange < fullRange) {
-            hibRange = Math.max(safeBaseHib, fullRange + 4.0f);
-        }
-        if (!Float.isFinite(mergeRadius) || mergeRadius <= 0f) {
-            mergeRadius = 3.5f;
-        }
-
-        String state = BrainDirective.stateNameForCode(stateCode);
-        String reason = String.format(
-            Locale.US,
-            "In-process Rust Governor (MSPT=%.2fms, EWMA=%.2fms, entities=%d, players=%d)",
-            safeCurrentMspt, nextEwma, loadedEntities, onlinePlayers
-        );
-
-        return new BrainDirective(
-            state,
-            stateCode,
-            nextEwma,
-            viewDist,
-            simDist,
-            fullRange,
-            hibRange,
-            itemMergeEnabled,
-            mergeRadius,
-            reason,
-            false
+        return arena.evaluateGovernor(
+            currentMspt, ewmaMspt, loadedEntities, onlinePlayers, baseFullRange,
+            baseHibernateRange, minViewDist, maxViewDist, minSimDist, maxSimDist
         );
     }
 
@@ -363,42 +188,11 @@ public final class SpicaRustAPI {
         int villagerCrowdThreshold,
         int brainStateCode
     ) {
-        ensureLoaded();
-        if (entityCount <= 0) {
-            return 0;
-        }
-        int clampedEntities = Math.min(entityCount, arena.getEntityCapacity());
-        int clampedPlayers = Math.clamp(playerCount, 0, arena.getTargetCapacity());
-        float safeCrowdRadius = Float.isFinite(crowdRadius) && crowdRadius > 0.25f ? crowdRadius : 3.5f;
-        int safeMild = Math.max(1, mildCrowdThreshold);
-        int safeSevere = Math.max(safeMild, severeCrowdThreshold);
-        int safeChunkLimit = Math.max(4, chunkMobLimit);
-        float safeWakeRange = Float.isFinite(villagerWakeRange) && villagerWakeRange >= 0f ? villagerWakeRange : 8.0f;
-        int safeVillagerCrowd = Math.max(1, villagerCrowdThreshold);
-        int safeState = Math.clamp(brainStateCode, BrainDirective.STATE_GREEN, BrainDirective.STATE_EMERGENCY);
-
-        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
-            return RustNative.nativeEvaluateFarmThrottling(
-                clampedEntities,
-                arena.xBuf,
-                arena.yBuf,
-                arena.zBuf,
-                arena.flagsBuf,
-                clampedPlayers,
-                arena.targetXBuf,
-                arena.targetYBuf,
-                arena.targetZBuf,
-                safeCrowdRadius,
-                safeMild,
-                safeSevere,
-                safeChunkLimit,
-                safeWakeRange,
-                safeVillagerCrowd,
-                safeState,
-                arena.outIntABuf,
-                arena.outIntBBuf
-            );
-        }
+        return arena.evaluateFarmThrottling(
+            entityCount, playerCount, crowdRadius, mildCrowdThreshold,
+            severeCrowdThreshold, chunkMobLimit, villagerWakeRange,
+            villagerCrowdThreshold, brainStateCode
+        );
     }
 
     /**
@@ -416,34 +210,7 @@ public final class SpicaRustAPI {
         int brainStateCode,
         float baseMaxElytraSpeed
     ) {
-        ensureLoaded();
-        if (playerCount <= 0) {
-            return 0;
-        }
-        int clampedPlayers = Math.min(playerCount, arena.getEntityCapacity());
-        int safeState = Math.clamp(brainStateCode, BrainDirective.STATE_GREEN, BrainDirective.STATE_EMERGENCY);
-        float safeBaseSpeed = Float.isFinite(baseMaxElytraSpeed) && baseMaxElytraSpeed > 0.1f
-            ? baseMaxElytraSpeed
-            : 1.8f;
-
-        try (EntityBatchArena.NativeLease ignored = arena.acquireNativeLease()) {
-            return RustNative.nativeEvaluatePlayerSurges(
-                clampedPlayers,
-                arena.xBuf,
-                arena.yBuf,
-                arena.zBuf,
-                arena.vxBuf,
-                arena.vyBuf,
-                arena.vzBuf,
-                arena.flagsBuf,
-                safeState,
-                safeBaseSpeed,
-                arena.outIntABuf,
-                arena.outXBuf,
-                arena.outYBuf,
-                arena.outZBuf
-            );
-        }
+        return arena.evaluatePlayerSurges(playerCount, brainStateCode, baseMaxElytraSpeed);
     }
 
     /**
@@ -461,6 +228,41 @@ public final class SpicaRustAPI {
         ByteBuffer outDist,
         ByteBuffer outDirX,
         ByteBuffer outDirZ
+    ) {
+        return computeFlowField(
+            width, depth, costGrid, goalX, goalZ, outDist, outDirX, outDirZ, false
+        );
+    }
+
+    /**
+     * Zero-copy variant. The caller must exclusively own every direct buffer for the full
+     * call, including all slices and duplicates. Sharing a buffer requires external synchronization.
+     */
+    public int computeFlowFieldWithExclusiveBuffers(
+        int width,
+        int depth,
+        ByteBuffer costGrid,
+        int goalX,
+        int goalZ,
+        ByteBuffer outDist,
+        ByteBuffer outDirX,
+        ByteBuffer outDirZ
+    ) {
+        return computeFlowField(
+            width, depth, costGrid, goalX, goalZ, outDist, outDirX, outDirZ, true
+        );
+    }
+
+    private int computeFlowField(
+        int width,
+        int depth,
+        ByteBuffer costGrid,
+        int goalX,
+        int goalZ,
+        ByteBuffer outDist,
+        ByteBuffer outDirX,
+        ByteBuffer outDirZ,
+        boolean exclusiveBuffers
     ) {
         ensureLoaded();
         if (width <= 0 || depth <= 0) {
@@ -482,16 +284,27 @@ public final class SpicaRustAPI {
             throw new IllegalArgumentException("Flow-field ByteBuffers are smaller than required grid size.");
         }
 
-        return RustNative.nativeComputeFlowField(
+        ByteBuffer[] scratch = exclusiveBuffers ? null : NATIVE_COPIES.get();
+        ByteBuffer stagedCostGrid = NativeCopies.prepare(scratch, 0, costGrid, (int) cells);
+        ByteBuffer stagedOutDist = NativeCopies.prepare(scratch, 1, outDist, floatBytes);
+        ByteBuffer stagedOutDirX = NativeCopies.prepare(scratch, 2, outDirX, floatBytes);
+        ByteBuffer stagedOutDirZ = NativeCopies.prepare(scratch, 3, outDirZ, floatBytes);
+        int result = RustNative.nativeComputeFlowField(
             width,
             depth,
-            costGrid,
+            stagedCostGrid,
             goalX,
             goalZ,
-            outDist,
-            outDirX,
-            outDirZ
+            stagedOutDist,
+            stagedOutDirX,
+            stagedOutDirZ
         );
+        if (result >= 0 && scratch != null) {
+            NativeCopies.copyOut(stagedOutDist, outDist, floatBytes);
+            NativeCopies.copyOut(stagedOutDirX, outDirX, floatBytes);
+            NativeCopies.copyOut(stagedOutDirZ, outDirZ, floatBytes);
+        }
+        return result;
     }
 
     /**
@@ -511,6 +324,49 @@ public final class SpicaRustAPI {
         float persistence,
         ByteBuffer outHeights
     ) {
+        return generateNoise2D(
+            originX, originZ, width, depth, step, seed, octaves, frequency, lacunarity, persistence,
+            outHeights, false
+        );
+    }
+
+    /**
+     * Zero-copy variant. The caller must exclusively own every direct buffer for the full
+     * call, including all slices and duplicates. Sharing a buffer requires external synchronization.
+     */
+    public int generateNoise2DWithExclusiveBuffers(
+        float originX,
+        float originZ,
+        int width,
+        int depth,
+        float step,
+        int seed,
+        int octaves,
+        float frequency,
+        float lacunarity,
+        float persistence,
+        ByteBuffer outHeights
+    ) {
+        return generateNoise2D(
+            originX, originZ, width, depth, step, seed, octaves, frequency, lacunarity, persistence,
+            outHeights, true
+        );
+    }
+
+    private int generateNoise2D(
+        float originX,
+        float originZ,
+        int width,
+        int depth,
+        float step,
+        int seed,
+        int octaves,
+        float frequency,
+        float lacunarity,
+        float persistence,
+        ByteBuffer outHeights,
+        boolean exclusiveBuffers
+    ) {
         ensureLoaded();
         if (width <= 0 || depth <= 0) {
             return 0;
@@ -529,7 +385,9 @@ public final class SpicaRustAPI {
         float safeLacunarity = Float.isFinite(lacunarity) && lacunarity > 0f ? lacunarity : 2.0f;
         float safePersistence = Float.isFinite(persistence) && persistence > 0f ? persistence : 0.5f;
 
-        return RustNative.nativeGenerateNoise2D(
+        ByteBuffer[] scratch = exclusiveBuffers ? null : NATIVE_COPIES.get();
+        ByteBuffer stagedOutHeights = NativeCopies.prepare(scratch, 0, outHeights, (int) cells * Float.BYTES);
+        int result = RustNative.nativeGenerateNoise2D(
             safeOriginX,
             safeOriginZ,
             width,
@@ -540,13 +398,17 @@ public final class SpicaRustAPI {
             safeFreq,
             safeLacunarity,
             safePersistence,
-            outHeights
+            stagedOutHeights
         );
+        if (result >= 0 && scratch != null) {
+            NativeCopies.copyOut(stagedOutHeights, outHeights, (int) cells * Float.BYTES);
+        }
+        return result;
     }
 
     /**
      * Evaluates per-player mob visibility (distance, vertical delta, rear-FOV cone, and per-player
-     * Top-K budget) in parallel zero-copy Rust and emits only state-transition deltas compared
+     * Top-K budget) in parallel Rust and emits only state-transition deltas compared
      * against {@code visibilityBitset} ({@code 1} = currently hidden, {@code 0} = currently visible).
      *
      * All ByteBuffers MUST be non-null direct ByteBuffers in native byte order.
@@ -577,6 +439,83 @@ public final class SpicaRustAPI {
         ByteBuffer outDeltaMobIdx,
         ByteBuffer outDeltaAction,
         ByteBuffer outStats
+    ) {
+        return computeMobTracking(
+            mobCount, mobXs, mobYs, mobZs, mobFlags, playerCount, playerXs, playerYs, playerZs,
+            playerLookXs, playerLookYs, playerLookZs, maxTrackRange, safetyNearRange,
+            maxVerticalDelta, rearCullRange, rearCullDotThreshold, maxMobsPerPlayer, brainStateCode,
+            visibilityBitset, maxDeltas, outDeltaPlayerIdx, outDeltaMobIdx, outDeltaAction, outStats,
+            false
+        );
+    }
+
+    /**
+     * Zero-copy variant. The caller must exclusively own every direct buffer for the full
+     * call, including all slices and duplicates. Sharing a buffer requires external synchronization.
+     */
+    public int computeMobTrackingWithExclusiveBuffers(
+        int mobCount,
+        ByteBuffer mobXs,
+        ByteBuffer mobYs,
+        ByteBuffer mobZs,
+        ByteBuffer mobFlags,
+        int playerCount,
+        ByteBuffer playerXs,
+        ByteBuffer playerYs,
+        ByteBuffer playerZs,
+        ByteBuffer playerLookXs,
+        ByteBuffer playerLookYs,
+        ByteBuffer playerLookZs,
+        float maxTrackRange,
+        float safetyNearRange,
+        float maxVerticalDelta,
+        float rearCullRange,
+        float rearCullDotThreshold,
+        int maxMobsPerPlayer,
+        int brainStateCode,
+        ByteBuffer visibilityBitset,
+        int maxDeltas,
+        ByteBuffer outDeltaPlayerIdx,
+        ByteBuffer outDeltaMobIdx,
+        ByteBuffer outDeltaAction,
+        ByteBuffer outStats
+    ) {
+        return computeMobTracking(
+            mobCount, mobXs, mobYs, mobZs, mobFlags, playerCount, playerXs, playerYs, playerZs,
+            playerLookXs, playerLookYs, playerLookZs, maxTrackRange, safetyNearRange,
+            maxVerticalDelta, rearCullRange, rearCullDotThreshold, maxMobsPerPlayer, brainStateCode,
+            visibilityBitset, maxDeltas, outDeltaPlayerIdx, outDeltaMobIdx, outDeltaAction, outStats,
+            true
+        );
+    }
+
+    private int computeMobTracking(
+        int mobCount,
+        ByteBuffer mobXs,
+        ByteBuffer mobYs,
+        ByteBuffer mobZs,
+        ByteBuffer mobFlags,
+        int playerCount,
+        ByteBuffer playerXs,
+        ByteBuffer playerYs,
+        ByteBuffer playerZs,
+        ByteBuffer playerLookXs,
+        ByteBuffer playerLookYs,
+        ByteBuffer playerLookZs,
+        float maxTrackRange,
+        float safetyNearRange,
+        float maxVerticalDelta,
+        float rearCullRange,
+        float rearCullDotThreshold,
+        int maxMobsPerPlayer,
+        int brainStateCode,
+        ByteBuffer visibilityBitset,
+        int maxDeltas,
+        ByteBuffer outDeltaPlayerIdx,
+        ByteBuffer outDeltaMobIdx,
+        ByteBuffer outDeltaAction,
+        ByteBuffer outStats,
+        boolean exclusiveBuffers
     ) {
         ensureLoaded();
         if (mobCount <= 0 || playerCount <= 0) {
@@ -650,19 +589,35 @@ public final class SpicaRustAPI {
         int safeMaxMobs = Math.max(1, maxMobsPerPlayer);
         int safeState = Math.clamp(brainStateCode, BrainDirective.STATE_GREEN, BrainDirective.STATE_EMERGENCY);
 
-        return RustNative.nativeComputeMobTracking(
+        ByteBuffer[] scratch = exclusiveBuffers ? null : NATIVE_COPIES.get();
+        ByteBuffer stagedMobXs = NativeCopies.prepare(scratch, 0, mobXs, (int) mobBytes);
+        ByteBuffer stagedMobYs = NativeCopies.prepare(scratch, 1, mobYs, (int) mobBytes);
+        ByteBuffer stagedMobZs = NativeCopies.prepare(scratch, 2, mobZs, (int) mobBytes);
+        ByteBuffer stagedMobFlags = NativeCopies.prepare(scratch, 3, mobFlags, (int) mobBytes);
+        ByteBuffer stagedPlayerXs = NativeCopies.prepare(scratch, 4, playerXs, (int) playerBytes);
+        ByteBuffer stagedPlayerYs = NativeCopies.prepare(scratch, 5, playerYs, (int) playerBytes);
+        ByteBuffer stagedPlayerZs = NativeCopies.prepare(scratch, 6, playerZs, (int) playerBytes);
+        ByteBuffer stagedPlayerLookXs = NativeCopies.prepare(scratch, 7, playerLookXs, (int) playerBytes);
+        ByteBuffer stagedPlayerLookYs = NativeCopies.prepare(scratch, 8, playerLookYs, (int) playerBytes);
+        ByteBuffer stagedPlayerLookZs = NativeCopies.prepare(scratch, 9, playerLookZs, (int) playerBytes);
+        ByteBuffer stagedVisibilityBitset = NativeCopies.prepare(scratch, 10, visibilityBitset, (int) neededBitsetBytes);
+        ByteBuffer stagedOutDeltaPlayerIdx = NativeCopies.prepare(scratch, 11, outDeltaPlayerIdx, (int) deltaBytes);
+        ByteBuffer stagedOutDeltaMobIdx = NativeCopies.prepare(scratch, 12, outDeltaMobIdx, (int) deltaBytes);
+        ByteBuffer stagedOutDeltaAction = NativeCopies.prepare(scratch, 13, outDeltaAction, (int) deltaBytes);
+        ByteBuffer stagedOutStats = NativeCopies.prepare(scratch, 14, outStats, 4 * Integer.BYTES);
+        int result = RustNative.nativeComputeMobTracking(
             mobCount,
-            mobXs,
-            mobYs,
-            mobZs,
-            mobFlags,
+            stagedMobXs,
+            stagedMobYs,
+            stagedMobZs,
+            stagedMobFlags,
             playerCount,
-            playerXs,
-            playerYs,
-            playerZs,
-            playerLookXs,
-            playerLookYs,
-            playerLookZs,
+            stagedPlayerXs,
+            stagedPlayerYs,
+            stagedPlayerZs,
+            stagedPlayerLookXs,
+            stagedPlayerLookYs,
+            stagedPlayerLookZs,
             safeMaxTrack,
             safeNear,
             safeVert,
@@ -670,17 +625,25 @@ public final class SpicaRustAPI {
             safeRearDot,
             safeMaxMobs,
             safeState,
-            visibilityBitset,
+            stagedVisibilityBitset,
             safeMaxDeltas,
-            outDeltaPlayerIdx,
-            outDeltaMobIdx,
-            outDeltaAction,
-            outStats
+            stagedOutDeltaPlayerIdx,
+            stagedOutDeltaMobIdx,
+            stagedOutDeltaAction,
+            stagedOutStats
         );
+        if (result >= 0 && scratch != null) {
+            NativeCopies.copyOut(stagedVisibilityBitset, visibilityBitset, (int) neededBitsetBytes);
+            NativeCopies.copyOut(stagedOutDeltaPlayerIdx, outDeltaPlayerIdx, result * Integer.BYTES);
+            NativeCopies.copyOut(stagedOutDeltaMobIdx, outDeltaMobIdx, result * Integer.BYTES);
+            NativeCopies.copyOut(stagedOutDeltaAction, outDeltaAction, result * Integer.BYTES);
+            NativeCopies.copyOut(stagedOutStats, outStats, 4 * Integer.BYTES);
+        }
+        return result;
     }
 
     /**
-     * Evaluates per-chunk Redstone & Hopper activity rates and thermal heat scores in zero-copy
+     * Evaluates per-chunk Redstone & Hopper activity rates and thermal heat scores in
      * Rust, returning the number of top hottest chunk indices written to {@code outTopIndices}.
      *
      * All ByteBuffers MUST be non-null direct ByteBuffers in native byte order.
@@ -700,6 +663,57 @@ public final class SpicaRustAPI {
         ByteBuffer outThrottleRatio,
         int maxTopChunks,
         ByteBuffer outTopIndices
+    ) {
+        return evaluateRedstoneChunks(
+            chunkCount, chunkXs, chunkZs, redstonePerSec, hopperPerSec, prevHeat, redstoneLimit,
+            hopperLimit, brainStateCode, outActions, outNewHeat, outThrottleRatio, maxTopChunks,
+            outTopIndices, false
+        );
+    }
+
+    /**
+     * Zero-copy variant. The caller must exclusively own every direct buffer for the full
+     * call, including all slices and duplicates. Sharing a buffer requires external synchronization.
+     */
+    public int evaluateRedstoneChunksWithExclusiveBuffers(
+        int chunkCount,
+        ByteBuffer chunkXs,
+        ByteBuffer chunkZs,
+        ByteBuffer redstonePerSec,
+        ByteBuffer hopperPerSec,
+        ByteBuffer prevHeat,
+        int redstoneLimit,
+        int hopperLimit,
+        int brainStateCode,
+        ByteBuffer outActions,
+        ByteBuffer outNewHeat,
+        ByteBuffer outThrottleRatio,
+        int maxTopChunks,
+        ByteBuffer outTopIndices
+    ) {
+        return evaluateRedstoneChunks(
+            chunkCount, chunkXs, chunkZs, redstonePerSec, hopperPerSec, prevHeat, redstoneLimit,
+            hopperLimit, brainStateCode, outActions, outNewHeat, outThrottleRatio, maxTopChunks,
+            outTopIndices, true
+        );
+    }
+
+    private int evaluateRedstoneChunks(
+        int chunkCount,
+        ByteBuffer chunkXs,
+        ByteBuffer chunkZs,
+        ByteBuffer redstonePerSec,
+        ByteBuffer hopperPerSec,
+        ByteBuffer prevHeat,
+        int redstoneLimit,
+        int hopperLimit,
+        int brainStateCode,
+        ByteBuffer outActions,
+        ByteBuffer outNewHeat,
+        ByteBuffer outThrottleRatio,
+        int maxTopChunks,
+        ByteBuffer outTopIndices,
+        boolean exclusiveBuffers
     ) {
         ensureLoaded();
         if (chunkCount <= 0) {
@@ -738,26 +752,43 @@ public final class SpicaRustAPI {
         int safeHopperLimit = Math.max(1, hopperLimit);
         int safeState = Math.clamp(brainStateCode, BrainDirective.STATE_GREEN, BrainDirective.STATE_EMERGENCY);
 
-        return RustNative.nativeEvaluateRedstoneChunks(
+        ByteBuffer[] scratch = exclusiveBuffers ? null : NATIVE_COPIES.get();
+        ByteBuffer stagedChunkXs = NativeCopies.prepare(scratch, 0, chunkXs, (int) chunkBytes);
+        ByteBuffer stagedChunkZs = NativeCopies.prepare(scratch, 1, chunkZs, (int) chunkBytes);
+        ByteBuffer stagedRedstonePerSec = NativeCopies.prepare(scratch, 2, redstonePerSec, (int) chunkBytes);
+        ByteBuffer stagedHopperPerSec = NativeCopies.prepare(scratch, 3, hopperPerSec, (int) chunkBytes);
+        ByteBuffer stagedPrevHeat = NativeCopies.prepare(scratch, 4, prevHeat, (int) chunkBytes);
+        ByteBuffer stagedOutActions = NativeCopies.prepare(scratch, 5, outActions, (int) chunkBytes);
+        ByteBuffer stagedOutNewHeat = NativeCopies.prepare(scratch, 6, outNewHeat, (int) chunkBytes);
+        ByteBuffer stagedOutThrottleRatio = NativeCopies.prepare(scratch, 7, outThrottleRatio, (int) chunkBytes);
+        ByteBuffer stagedOutTopIndices = NativeCopies.prepare(scratch, 8, outTopIndices, (int) topBytes);
+        int result = RustNative.nativeEvaluateRedstoneChunks(
             chunkCount,
-            chunkXs,
-            chunkZs,
-            redstonePerSec,
-            hopperPerSec,
-            prevHeat,
+            stagedChunkXs,
+            stagedChunkZs,
+            stagedRedstonePerSec,
+            stagedHopperPerSec,
+            stagedPrevHeat,
             safeRedstoneLimit,
             safeHopperLimit,
             safeState,
-            outActions,
-            outNewHeat,
-            outThrottleRatio,
+            stagedOutActions,
+            stagedOutNewHeat,
+            stagedOutThrottleRatio,
             safeMaxTop,
-            outTopIndices
+            stagedOutTopIndices
         );
+        if (result >= 0 && scratch != null) {
+            NativeCopies.copyOut(stagedOutActions, outActions, (int) chunkBytes);
+            NativeCopies.copyOut(stagedOutNewHeat, outNewHeat, (int) chunkBytes);
+            NativeCopies.copyOut(stagedOutThrottleRatio, outThrottleRatio, (int) chunkBytes);
+            NativeCopies.copyOut(stagedOutTopIndices, outTopIndices, (int) topBytes);
+        }
+        return result;
     }
 
     /**
-     * Computes a parallel zero-copy 3D arena/region block diff in Rust (YZX layout:
+     * Computes a parallel 3D arena/region block diff in Rust (YZX layout:
      * {@code idx = (y * depth + z) * width + x}).
      *
      * Return value semantics:
@@ -776,6 +807,47 @@ public final class SpicaRustAPI {
         ByteBuffer outRelY,
         ByteBuffer outRelZ,
         ByteBuffer outNewBlockId
+    ) {
+        return computeBlockDiff(
+            width, height, depth, currentBlocks, targetBlocks, maxDiffs, outRelX, outRelY, outRelZ,
+            outNewBlockId, false
+        );
+    }
+
+    /**
+     * Zero-copy variant. The caller must exclusively own every direct buffer for the full
+     * call, including all slices and duplicates. Sharing a buffer requires external synchronization.
+     */
+    public int computeBlockDiffWithExclusiveBuffers(
+        int width,
+        int height,
+        int depth,
+        ByteBuffer currentBlocks,
+        ByteBuffer targetBlocks,
+        int maxDiffs,
+        ByteBuffer outRelX,
+        ByteBuffer outRelY,
+        ByteBuffer outRelZ,
+        ByteBuffer outNewBlockId
+    ) {
+        return computeBlockDiff(
+            width, height, depth, currentBlocks, targetBlocks, maxDiffs, outRelX, outRelY, outRelZ,
+            outNewBlockId, true
+        );
+    }
+
+    private int computeBlockDiff(
+        int width,
+        int height,
+        int depth,
+        ByteBuffer currentBlocks,
+        ByteBuffer targetBlocks,
+        int maxDiffs,
+        ByteBuffer outRelX,
+        ByteBuffer outRelY,
+        ByteBuffer outRelZ,
+        ByteBuffer outNewBlockId,
+        boolean exclusiveBuffers
     ) {
         ensureLoaded();
         if (width <= 0 || height <= 0 || depth <= 0) {
@@ -811,18 +883,60 @@ public final class SpicaRustAPI {
             }
         }
 
-        return RustNative.nativeComputeBlockDiff(
+        ByteBuffer[] scratch = exclusiveBuffers ? null : NATIVE_COPIES.get();
+        ByteBuffer stagedCurrentBlocks = NativeCopies.prepare(scratch, 0, currentBlocks, (int) blockBytes);
+        ByteBuffer stagedTargetBlocks = NativeCopies.prepare(scratch, 1, targetBlocks, (int) blockBytes);
+        ByteBuffer stagedOutRelX = safeMaxDiffs == 0 ? null : NativeCopies.prepare(scratch, 2, outRelX, safeMaxDiffs * Integer.BYTES);
+        ByteBuffer stagedOutRelY = safeMaxDiffs == 0 ? null : NativeCopies.prepare(scratch, 3, outRelY, safeMaxDiffs * Integer.BYTES);
+        ByteBuffer stagedOutRelZ = safeMaxDiffs == 0 ? null : NativeCopies.prepare(scratch, 4, outRelZ, safeMaxDiffs * Integer.BYTES);
+        ByteBuffer stagedOutNewBlockId = safeMaxDiffs == 0 ? null : NativeCopies.prepare(scratch, 5, outNewBlockId, safeMaxDiffs * Integer.BYTES);
+        int result = RustNative.nativeComputeBlockDiff(
             width,
             height,
             depth,
-            currentBlocks,
-            targetBlocks,
+            stagedCurrentBlocks,
+            stagedTargetBlocks,
             safeMaxDiffs,
-            outRelX,
-            outRelY,
-            outRelZ,
-            outNewBlockId
+            stagedOutRelX,
+            stagedOutRelY,
+            stagedOutRelZ,
+            stagedOutNewBlockId
         );
+        if (result > 0 && safeMaxDiffs > 0 && scratch != null) {
+            int writtenBytes = result * Integer.BYTES;
+            NativeCopies.copyOut(stagedOutRelX, outRelX, writtenBytes);
+            NativeCopies.copyOut(stagedOutRelY, outRelY, writtenBytes);
+            NativeCopies.copyOut(stagedOutRelZ, outRelZ, writtenBytes);
+            NativeCopies.copyOut(stagedOutNewBlockId, outNewBlockId, writtenBytes);
+        }
+        return result;
+    }
+
+    private static final class NativeCopies {
+        private static final int MAX_CACHED_BYTES = 8 * 1024 * 1024;
+        static ByteBuffer prepare(ByteBuffer[] scratch, int slot, ByteBuffer source, int length) {
+            if (scratch == null) {
+                return source;
+            }
+
+            ByteBuffer buffer = scratch[slot];
+            if (buffer == null || buffer.capacity() < length) {
+                buffer = ByteBuffer.allocateDirect(length).order(ByteOrder.nativeOrder());
+                if (length <= MAX_CACHED_BYTES) {
+                    scratch[slot] = buffer;
+                }
+            }
+            if (length > 0) {
+                buffer.put(0, source.duplicate().clear(), 0, length);
+            }
+            return buffer;
+        }
+
+        static void copyOut(ByteBuffer staged, ByteBuffer destination, int length) {
+            if (length > 0) {
+                destination.duplicate().clear().put(0, staged, 0, length);
+            }
+        }
     }
 
     private static void requireDirectBuffer(ByteBuffer buf, String name) {

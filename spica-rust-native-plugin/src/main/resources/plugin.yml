@@ -6,6 +6,10 @@ description: Purpur 1.21.4 Execution Core + Rust Brain + Farm/Villager Governor 
 authors:
   - Spica Network
 commands:
+  spicabackupcheckpoint:
+    description: Runs a launcher-requested vanilla world checkpoint.
+    usage: /spicabackupcheckpoint <checkpoint-id>
+    permission: SpicaRustNative.admin
   rustbridge:
     description: Spica Rust Bridge durum, Rust Brain, Farm Governor, Surge Guard, Mob Tracking, Redstone/Hopper Governor, Flow-Field/Noise kernel benchmark ve tarama komutlari.
     usage: /rustbridge <status|brain|farms|surge|tracking|redstone|kernels|chunks|bench|scan|reload>

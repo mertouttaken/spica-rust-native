@@ -93,7 +93,7 @@ Executed against a live Purpur 1.21.4 server (~1,169 entities) using the bundled
 | **Total Clientbound Packets** | `311,546` (`19,459 pkt/s`) | **`280,944` (`17,548 pkt/s`)** | **-9.8% total packets** |
 | **Server Outbound Bandwidth** | `666.0 KB/s` | **`556.0 KB/s`** | **-16.5% outbound bandwidth** |
 
-- **Live Zero-JVM-Overhead Rust World Backup (`:backup`):** Safely executed `save-off` → `save-all flush` → atomic `.tar.gz` archival across `world`, `world_nether`, `world_the_end` (**122 files, 1.97 MB compressed, skipping `session.lock`**) in **`142 ms`**, then guaranteed `save-on` restoration and updated `spica_backups_completed_total`, `spica_last_backup_duration_ms`, and `spica_last_backup_size_mb`.
+- **Historical archive benchmark:** The original v2.6.0 archive stage compressed 122 files across three worlds to 1.97 MB in 142 ms. The current live backup adds filesystem snapshot creation before archiving.
 
 ### 4. Live World Diagnostics & Standalone Rust Kernels
 
@@ -178,7 +178,7 @@ Every push/PR to `main` and version tag (`v*`) runs [`.github/workflows/ci-relea
 ### Launcher Supervisor Commands (Terminal)
 - `:brain` — Live Rust Brain state (`GREEN`–`EMERGENCY`), EWMA MSPT, IPC status, and active directive
 - `:stats` — Host CPU/RAM, JVM heap usage, TPS, entity count, hibernated mobs, Farm/Villager Governor, and World Backup stats
-- `:backup` — Runs an immediate zero-JVM-overhead Rust `.tar.gz` world backup (`save-off` → `save-all flush` → archive skipping `session.lock` → guaranteed `save-on` + rotation)
+- `:backup` — Flushes a Purpur checkpoint, then archives a filesystem snapshot as `.tar.gz`. Each world's autosave setting is retained. Requires the snapshot provider below.
 - `:restart` — Gracefully stops Purpur (`stop`) and restarts cleanly
 - `:stop` — Gracefully shuts down Purpur and exits the launcher
 
@@ -187,6 +187,24 @@ Every push/PR to `main` and version tag (`v*`) runs [`.github/workflows/ci-relea
 - `GET http://127.0.0.1:9120/history` — Atomic JSON snapshot + 120-second telemetry ring buffer
 - `GET http://127.0.0.1:9120/status` — Live JSON status snapshot
 - `GET http://127.0.0.1:9120/metrics` — Prometheus exposition metrics (`spica_mspt`, `spica_ewma_mspt`, `spica_tps`, `spica_entities`, `spica_hibernated_mobs`, `spica_farm_throttled_mobs`, `spica_villagers_throttled`, `spica_tracked_pairs_hidden`, `spica_redstone_chunks_throttled`, `spica_backups_completed_total`, `spica_last_backup_duration_ms`, `spica_brain_state`, `spica_host_cpu_percent`, etc.)
+
+### Live snapshot backups
+
+Set `backup.snapshot_command` in `spica-launcher.toml` to the executable and optional fixed arguments for your filesystem snapshot provider. The launcher disables scheduled backups and rejects manual backups while this setting is empty.
+
+```toml
+[backup]
+snapshot_command = ["/absolute/path/to/snapshot-provider"]
+worlds = ["world", "world_nether", "world_the_end"]
+```
+
+After a matching Purpur `save-all flush` result, the launcher runs the configured command with `create <server-root> <staging> <world>...` appended. The provider must expose one immutable point-in-time view covering all listed worlds under `<staging>/view/<world>`. Use a filesystem or volume snapshot. If the worlds span volumes, the provider must capture them as a consistent group. The provider runs under the launcher account and needs the appropriate snapshot permissions. The launcher never modifies any world's autosave flag.
+
+The launcher archives the view and then calls the same command with `release <server-root> <staging> <world>...`. Release must also handle an interrupted or failed create. Each command has a 60-second limit. The provider should execute in the foreground and remove the view or mount during release. The launcher removes the staging directory once it is empty.
+
+### Java native buffers
+
+Use `EntityBatchArena` scalar setters and getters. To share an arena across threads, wrap the entire fill, compute and read sequence in `withExclusiveAccess`. The ordinary `SpicaRustAPI` overloads that accept external `ByteBuffer` instances stage the input and output through private direct memory. For zero-copy calls with exclusively owned buffers, the `WithExclusiveBuffers` overloads require the caller to keep every view inaccessible to other threads until the call returns.
 
 ### In-Game Purpur Commands (`/rustbridge`)
 

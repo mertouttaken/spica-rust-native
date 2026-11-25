@@ -158,8 +158,8 @@ public final class SafeItemMergeHelper {
         Location locB = new Location(null, 0.0, 0.0, 0.0);
 
         for (int p = 0; p < clampedPairs; p++) {
-            int targetIdx = arena.outIntA.get(p);
-            int sourceIdx = arena.outIntB.get(p);
+            int targetIdx = arena.getOutIntA(p);
+            int sourceIdx = arena.getOutIntB(p);
             if (targetIdx < 0 || targetIdx >= itemCount
                 || sourceIdx < 0 || sourceIdx >= itemCount
                 || targetIdx == sourceIdx) {

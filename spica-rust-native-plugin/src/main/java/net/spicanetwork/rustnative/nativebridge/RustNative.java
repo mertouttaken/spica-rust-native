@@ -7,6 +7,10 @@ import java.nio.ByteBuffer;
  *
  * All buffer parameters MUST be direct ByteBuffers (`ByteBuffer.allocateDirect`)
  * ordered with `ByteOrder.nativeOrder()`. Zero copying happens across the JNI boundary.
+ *
+ * Low-level FFI contract: the caller must exclusively own all passed buffers and all their
+ * views until the native call returns. Use the ordinary SpicaRustAPI methods to stage
+ * caller-owned buffers without exposing them to Rust.
  */
 public final class RustNative {
 

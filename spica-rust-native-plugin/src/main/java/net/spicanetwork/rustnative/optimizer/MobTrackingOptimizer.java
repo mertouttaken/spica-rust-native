@@ -468,7 +468,7 @@ public final class MobTrackingOptimizer implements Listener {
             ensureDeltaCapacity(callMaxDeltas);
 
             long rustStart = System.nanoTime();
-            int deltaCount = api.computeMobTracking(
+            int deltaCount = api.computeMobTrackingWithExclusiveBuffers(
                 mobCount,
                 mobXBuf,
                 mobYBuf,
