@@ -1,14 +1,14 @@
 name: SpicaRustNative
-version: 2.3.0
+version: 2.4.0
 main: net.spicanetwork.rustnative.SpicaRustNativePlugin
 api-version: '1.21'
-description: Purpur 1.21.4 Execution Core + Rust Brain + Farm/Villager Governor + Elytra/Explosion Surge Guard + Flow-Field/Noise Kernels
+description: Purpur 1.21.4 Execution Core + Rust Brain + Farm/Villager Governor + Elytra/Explosion Surge Guard + Mob Visibility & Tracking Optimizer + Flow-Field/Noise Kernels
 authors:
   - Spica Network
 commands:
   rustbridge:
-    description: Spica Rust Bridge durum, Rust Brain, Farm Governor, Surge Guard, Flow-Field/Noise kernel benchmark ve tarama komutlari.
-    usage: /rustbridge <status|brain|farms|surge|kernels|chunks|bench|scan|reload>
+    description: Spica Rust Bridge durum, Rust Brain, Farm Governor, Surge Guard, Mob Tracking Optimizer, Flow-Field/Noise kernel benchmark ve tarama komutlari.
+    usage: /rustbridge <status|brain|farms|surge|tracking|kernels|chunks|bench|scan|reload>
     permission: SpicaRustNative.admin
 permissions:
   SpicaRustNative.admin:
@@ -16,4 +16,7 @@ permissions:
     default: op
   spicarustnative.bypass.elytra:
     description: Elytra Surge Guard hiz dengelemesinden muafiyet.
+    default: false
+  spicarustnative.bypass.tracking:
+    description: Mob Tracking Optimizer gorunurluk gizleme isleminden muafiyet.
     default: false

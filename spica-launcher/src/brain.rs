@@ -103,6 +103,10 @@ pub struct TelemetryPayload {
     pub elytra_clamps: u64,
     #[serde(rename = "explosionItemsMerged", default)]
     pub explosion_items_merged: u64,
+    #[serde(rename = "trackedPairsHidden", default)]
+    pub tracked_pairs_hidden: u32,
+    #[serde(rename = "trackingTransitionsPerSec", default)]
+    pub tracking_transitions_per_sec: u32,
     #[serde(default)]
     pub players: u32,
     #[serde(rename = "loadedChunks", default)]
@@ -151,6 +155,8 @@ pub struct BrainSnapshot {
     pub villagers_throttled: u32,
     pub elytra_clamps: u64,
     pub explosion_items_merged: u64,
+    pub tracked_pairs_hidden: u32,
+    pub tracking_transitions_per_sec: u32,
     pub players: u32,
     pub loaded_chunks: u32,
     pub heap_used_mb: u64,
@@ -197,6 +203,8 @@ pub struct BrainState {
     pub villagers_throttled: u32,
     pub elytra_clamps: u64,
     pub explosion_items_merged: u64,
+    pub tracked_pairs_hidden: u32,
+    pub tracking_transitions_per_sec: u32,
     pub players: u32,
     pub loaded_chunks: u32,
     pub heap_used_mb: u64,
@@ -308,6 +316,8 @@ impl BrainState {
             villagers_throttled: 0,
             elytra_clamps: 0,
             explosion_items_merged: 0,
+            tracked_pairs_hidden: 0,
+            tracking_transitions_per_sec: 0,
             players: 0,
             loaded_chunks: 0,
             heap_used_mb: 0,
@@ -399,6 +409,8 @@ impl BrainState {
         self.villagers_throttled = telemetry.villagers_throttled;
         self.elytra_clamps = telemetry.elytra_clamps;
         self.explosion_items_merged = telemetry.explosion_items_merged;
+        self.tracked_pairs_hidden = telemetry.tracked_pairs_hidden;
+        self.tracking_transitions_per_sec = telemetry.tracking_transitions_per_sec;
         self.players = telemetry.players;
         self.loaded_chunks = telemetry.loaded_chunks;
         self.heap_used_mb = telemetry.heap_used_mb;
@@ -463,6 +475,8 @@ impl BrainState {
             villagers_throttled: self.villagers_throttled,
             elytra_clamps: self.elytra_clamps,
             explosion_items_merged: self.explosion_items_merged,
+            tracked_pairs_hidden: self.tracked_pairs_hidden,
+            tracking_transitions_per_sec: self.tracking_transitions_per_sec,
             players: self.players,
             loaded_chunks: self.loaded_chunks,
             heap_used_mb: self.heap_used_mb,
@@ -495,6 +509,8 @@ mod tests {
             villagers_throttled: 0,
             elytra_clamps: 0,
             explosion_items_merged: 0,
+            tracked_pairs_hidden: 0,
+            tracking_transitions_per_sec: 0,
             players: 18,
             loaded_chunks: 1600,
             heap_used_mb: 2400,
@@ -715,6 +731,66 @@ mod tests {
     }
 
     #[test]
+    fn test_mob_tracking_telemetry_roundtrip_and_defaults() {
+        let mut brain = BrainState::new(BrainConfig::default(), 4096, 16384);
+
+        // 1. Telemetry containing trackedPairsHidden & trackingTransitionsPerSec
+        let json_with_tracking = r#"{
+            "type": "telemetry",
+            "mspt": 23.2,
+            "tps": 20.0,
+            "entities": 580,
+            "hibernated": 110,
+            "farmThrottled": 45,
+            "villagersThrottled": 16,
+            "elytraClamps": 5,
+            "explosionItemsMerged": 120,
+            "trackedPairsHidden": 2340,
+            "trackingTransitionsPerSec": 95,
+            "players": 22,
+            "loadedChunks": 1750,
+            "heapUsedMb": 2800,
+            "heapMaxMb": 8192
+        }"#;
+        let payload: TelemetryPayload = serde_json::from_str(json_with_tracking)
+            .expect("deserialize telemetry with mob tracking fields");
+        assert_eq!(payload.tracked_pairs_hidden, 2340);
+        assert_eq!(payload.tracking_transitions_per_sec, 95);
+
+        let _ = brain.ingest_telemetry(&payload);
+        let snap = brain.snapshot();
+        assert_eq!(snap.tracked_pairs_hidden, 2340);
+        assert_eq!(snap.tracking_transitions_per_sec, 95);
+
+        let snap_json = serde_json::to_value(&snap).expect("serialize snapshot");
+        assert_eq!(snap_json["trackedPairsHidden"], 2340);
+        assert_eq!(snap_json["trackingTransitionsPerSec"], 95);
+
+        // 2. Legacy telemetry omitting trackedPairsHidden & trackingTransitionsPerSec defaults both to 0
+        let legacy_json = r#"{
+            "type": "telemetry",
+            "mspt": 18.0,
+            "tps": 20.0,
+            "entities": 240,
+            "hibernated": 30,
+            "players": 6,
+            "loadedChunks": 750,
+            "heapUsedMb": 1350,
+            "heapMaxMb": 8192
+        }"#;
+        let legacy_payload: TelemetryPayload =
+            serde_json::from_str(legacy_json).expect("deserialize legacy telemetry");
+        assert_eq!(legacy_payload.tracked_pairs_hidden, 0);
+        assert_eq!(legacy_payload.tracking_transitions_per_sec, 0);
+
+        let _ = brain.ingest_telemetry(&legacy_payload);
+        let legacy_snap_json =
+            serde_json::to_value(&brain.snapshot()).expect("serialize legacy snapshot");
+        assert_eq!(legacy_snap_json["trackedPairsHidden"], 0);
+        assert_eq!(legacy_snap_json["trackingTransitionsPerSec"], 0);
+    }
+
+    #[test]
     fn test_history_ring_buffer_caps_at_120_and_preserves_newest() {
         let mut brain = BrainState::new(BrainConfig::default(), 4096, 16384);
         brain.update_host_metrics(28.4, 5120, 16384);
@@ -729,6 +805,8 @@ mod tests {
                 villagers_throttled: tick / 5,
                 elytra_clamps: tick as u64,
                 explosion_items_merged: (tick as u64) * 2,
+                tracked_pairs_hidden: tick * 4,
+                tracking_transitions_per_sec: tick % 25,
                 players: 10,
                 loaded_chunks: 1000,
                 heap_used_mb: 2048 + tick as u64,

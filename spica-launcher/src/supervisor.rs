@@ -204,6 +204,10 @@ fn print_stats(brain: &Arc<Mutex<BrainState>>) {
         s.elytra_clamps, s.explosion_items_merged
     );
     println!(
+        "  Mob Tracking   : Hidden Pairs={} | Transitions/s={}",
+        s.tracked_pairs_hidden, s.tracking_transitions_per_sec
+    );
+    println!(
         "  Calisma Suresi : {} sn | Brain: {}",
         s.uptime_secs, s.state
     );

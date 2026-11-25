@@ -31,6 +31,15 @@ public final class RustNative {
     public static final int SURGE_WARN = 1;
     public static final int SURGE_CLAMP_VELOCITY = 2;
 
+    // Mob Visibility & Tracking Optimizer per-mob input flags
+    public static final int TRACK_FLAG_ALWAYS_VISIBLE = 1;
+    public static final int TRACK_FLAG_HOSTILE = 2;
+    public static final int TRACK_FLAG_PASSIVE = 4;
+
+    // Mob Visibility & Tracking Optimizer delta actions
+    public static final int TRACK_ACTION_HIDE = 0;
+    public static final int TRACK_ACTION_SHOW = 1;
+
     private RustNative() {
     }
 
@@ -254,5 +263,38 @@ public final class RustNative {
         float lacunarity,
         float persistence,
         ByteBuffer outHeights
+    );
+
+    /**
+     * Evaluates per-player mob visibility (distance, vertical delta, rear-FOV cone, and per-player
+     * Top-K budget) in parallel zero-copy Rust and outputs only state-transition deltas
+     * ({@code TRACK_ACTION_HIDE} / {@code TRACK_ACTION_SHOW}) against {@code visibilityBitset}.
+     */
+    public static native int nativeComputeMobTracking(
+        int mobCount,
+        ByteBuffer mobXs,
+        ByteBuffer mobYs,
+        ByteBuffer mobZs,
+        ByteBuffer mobFlags,
+        int playerCount,
+        ByteBuffer playerXs,
+        ByteBuffer playerYs,
+        ByteBuffer playerZs,
+        ByteBuffer playerLookXs,
+        ByteBuffer playerLookYs,
+        ByteBuffer playerLookZs,
+        float maxTrackRange,
+        float safetyNearRange,
+        float maxVerticalDelta,
+        float rearCullRange,
+        float rearCullDotThreshold,
+        int maxMobsPerPlayer,
+        int brainStateCode,
+        ByteBuffer visibilityBitset,
+        int maxDeltas,
+        ByteBuffer outDeltaPlayerIdx,
+        ByteBuffer outDeltaMobIdx,
+        ByteBuffer outDeltaAction,
+        ByteBuffer outStats
     );
 }

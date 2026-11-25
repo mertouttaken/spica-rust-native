@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SpicaRustNative v2.3.0 — Live Telemetry Dashboard</title>
+  <title>SpicaRustNative v2.4.0 — Live Telemetry Dashboard</title>
   <style>
     :root {
       --bg: #0b0f17;
@@ -628,7 +628,7 @@
         <div>
           <div class="brand-title">
             SpicaRustNative
-            <span class="version-pill">v2.3.0</span>
+            <span class="version-pill">v2.4.0</span>
           </div>
           <div class="brand-sub" id="serverMeta">Purpur 1.21.4 Core + Rust Brain</div>
         </div>
@@ -748,6 +748,16 @@
           <div class="mini-stat">
             <span class="mini-label">Players</span>
             <span class="mini-val" id="kpiPlayers" style="color:#22d3ee;">0</span>
+          </div>
+        </div>
+        <div class="sub-badge-row">
+          <div class="sub-badge">
+            <span class="sub-badge-key">Hidden Track Pairs</span>
+            <span class="sub-badge-val" id="kpiTrackedPairsHidden" style="color:#10b981;">0</span>
+          </div>
+          <div class="sub-badge">
+            <span class="sub-badge-key">Track &Delta;/s</span>
+            <span class="sub-badge-val" id="kpiTrackingTransitions" style="color:#22d3ee;">0</span>
           </div>
         </div>
       </article>
@@ -907,6 +917,8 @@
         kpiEntities: $("kpiEntities"),
         kpiChunks: $("kpiChunks"),
         kpiPlayers: $("kpiPlayers"),
+        kpiTrackedPairsHidden: $("kpiTrackedPairsHidden"),
+        kpiTrackingTransitions: $("kpiTrackingTransitions"),
         entityDensityTag: $("entityDensityTag"),
         kpiHibernated: $("kpiHibernated"),
         kpiFarmThrottled: $("kpiFarmThrottled"),
@@ -1062,9 +1074,13 @@
         const entities = Math.round(num(snap.entities, 0));
         const chunks = Math.round(num(snap.loadedChunks, 0));
         const players = Math.round(num(snap.players, 0));
+        const trackedPairsHidden = Math.round(num(snap.trackedPairsHidden, 0));
+        const trackingTransitions = Math.round(num(snap.trackingTransitionsPerSec, 0));
         els.kpiEntities.textContent = entities.toLocaleString();
         els.kpiChunks.textContent = chunks.toLocaleString();
         els.kpiPlayers.textContent = players.toLocaleString();
+        els.kpiTrackedPairsHidden.textContent = trackedPairsHidden.toLocaleString();
+        els.kpiTrackingTransitions.textContent = trackingTransitions.toLocaleString();
         const density = chunks > 0 ? (entities / chunks).toFixed(2) : "0.00";
         els.entityDensityTag.textContent = density + " / chunk";
 

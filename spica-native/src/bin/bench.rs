@@ -4,7 +4,8 @@
 use std::time::Instant;
 
 use spica_rust_native::{
-    farm_governor, flowfield, governor, heatmap, init_thread_pool, kernels, noise, run_in_pool,
+    farm_governor, flowfield, governor, heatmap, init_thread_pool, kernels, mob_tracker, noise,
+    run_in_pool,
 };
 
 fn lcg_next(state: &mut u64) -> f32 {
@@ -350,9 +351,102 @@ fn main() {
         dt_noise, noise_samples
     );
 
-    let total_ms = dt_coll + dt_ai + dt_boids + dt_heatmap + dt_merge + dt_gov_ms + dt_farm;
+    // 10) Mob Tracking 100p x 2000m (200k pairs)
+    let track_players = 100usize;
+    let track_mobs = 2_000usize;
+    let mut track_mob_flags = Vec::with_capacity(track_mobs);
+    for i in 0..track_mobs {
+        let flag = if i % 100 == 0 {
+            mob_tracker::TRACK_FLAG_ALWAYS_VISIBLE | mob_tracker::TRACK_FLAG_HOSTILE
+        } else if i % 3 == 0 {
+            mob_tracker::TRACK_FLAG_HOSTILE
+        } else {
+            mob_tracker::TRACK_FLAG_PASSIVE
+        };
+        track_mob_flags.push(flag);
+    }
+    let mut plx = Vec::with_capacity(track_players);
+    let mut ply = Vec::with_capacity(track_players);
+    let mut plz = Vec::with_capacity(track_players);
+    for _ in 0..track_players {
+        let angle = lcg_next(&mut seed) * std::f32::consts::TAU;
+        plx.push(angle.cos());
+        ply.push(0.0);
+        plz.push(angle.sin());
+    }
+    let mut track_bitset = vec![0u8; (track_players * track_mobs + 7) / 8];
+    let track_max_deltas = 65_536usize;
+    let mut out_dp = vec![0i32; track_max_deltas];
+    let mut out_dm = vec![0i32; track_max_deltas];
+    let mut out_da = vec![0i32; track_max_deltas];
+    let mut track_stats = [0i32; 4];
+
+    // Warmup initial bitset state
+    run_in_pool(|| {
+        mob_tracker::compute_mob_tracking(
+            &xs[..track_mobs],
+            &ys[..track_mobs],
+            &zs[..track_mobs],
+            &track_mob_flags,
+            &pxs[..track_players],
+            &pys[..track_players],
+            &pzs[..track_players],
+            &plx,
+            &ply,
+            &plz,
+            48.0,
+            12.0,
+            24.0,
+            16.0,
+            -0.25,
+            48,
+            last_state,
+            &mut track_bitset,
+            &mut out_dp,
+            &mut out_dm,
+            &mut out_da,
+            &mut track_stats,
+        )
+    });
+
+    let t9 = Instant::now();
+    for _ in 0..iterations {
+        run_in_pool(|| {
+            mob_tracker::compute_mob_tracking(
+                &xs[..track_mobs],
+                &ys[..track_mobs],
+                &zs[..track_mobs],
+                &track_mob_flags,
+                &pxs[..track_players],
+                &pys[..track_players],
+                &pzs[..track_players],
+                &plx,
+                &ply,
+                &plz,
+                48.0,
+                12.0,
+                24.0,
+                16.0,
+                -0.25,
+                48,
+                last_state,
+                &mut track_bitset,
+                &mut out_dp,
+                &mut out_dm,
+                &mut out_da,
+                &mut track_stats,
+            )
+        });
+    }
+    let dt_track = t9.elapsed().as_secs_f64() * 1000.0 / (iterations as f64);
     println!(
-        "\nTotal per-tick budget [1..7]: {:.3} ms / 50.000 ms tick ({:.2}% of 1 tick)",
+        "[10] Mob Tracking 100p x 2000m (200k pairs): {:.3} ms/tick (hidden: {}, visible: {}, budget-culled: {})",
+        dt_track, track_stats[0], track_stats[1], track_stats[3]
+    );
+
+    let total_ms = dt_coll + dt_ai + dt_boids + dt_heatmap + dt_merge + dt_gov_ms + dt_farm + dt_track;
+    println!(
+        "\nTotal per-tick budget [1..7, 10]: {:.3} ms / 50.000 ms tick ({:.2}% of 1 tick)",
         total_ms,
         total_ms / 50.0 * 100.0
     );

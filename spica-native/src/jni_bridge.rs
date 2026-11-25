@@ -11,7 +11,7 @@ use jni::objects::{JByteBuffer, JClass};
 use jni::sys::{jfloat, jint, jlong, jstring};
 use jni::JNIEnv;
 
-use crate::{farm_governor, flowfield, governor, heatmap, kernels, noise, surge_guard};
+use crate::{farm_governor, flowfield, governor, heatmap, kernels, mob_tracker, noise, surge_guard};
 
 /// Safely view a Java DirectByteBuffer as an immutable slice `&[T]`.
 unsafe fn buf_as_slice<'a, T>(
@@ -732,6 +732,140 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
                 lacunarity,
                 persistence,
                 out_heights,
+            )
+        })
+    }))
+    .unwrap_or(-1)
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments, unused_mut)]
+pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_nativeComputeMobTracking<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    mob_count: jint,
+    mob_xs_buf: JByteBuffer<'local>,
+    mob_ys_buf: JByteBuffer<'local>,
+    mob_zs_buf: JByteBuffer<'local>,
+    mob_flags_buf: JByteBuffer<'local>,
+    player_count: jint,
+    player_xs_buf: JByteBuffer<'local>,
+    player_ys_buf: JByteBuffer<'local>,
+    player_zs_buf: JByteBuffer<'local>,
+    player_look_xs_buf: JByteBuffer<'local>,
+    player_look_ys_buf: JByteBuffer<'local>,
+    player_look_zs_buf: JByteBuffer<'local>,
+    max_track_range: jfloat,
+    safety_near_range: jfloat,
+    max_vertical_delta: jfloat,
+    rear_cull_range: jfloat,
+    rear_cull_dot_threshold: jfloat,
+    max_mobs_per_player: jint,
+    brain_state_code: jint,
+    visibility_bitset_buf: JByteBuffer<'local>,
+    max_deltas: jint,
+    out_delta_player_idx_buf: JByteBuffer<'local>,
+    out_delta_mob_idx_buf: JByteBuffer<'local>,
+    out_delta_action_buf: JByteBuffer<'local>,
+    out_stats_buf: JByteBuffer<'local>,
+) -> jint {
+    if mob_count <= 0 || player_count <= 0 {
+        let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+            if !out_stats_buf.is_null() {
+                if let Ok(out_stats) = buf_as_mut_slice::<i32>(&mut env, &out_stats_buf, 4) {
+                    out_stats[0] = 0;
+                    out_stats[1] = 0;
+                    out_stats[2] = 0;
+                    out_stats[3] = 0;
+                }
+            }
+        }));
+        return 0;
+    }
+
+    let m = mob_count as usize;
+    let p = player_count as usize;
+    let max_d = max_deltas.max(0) as usize;
+    let Some(total_bits) = p.checked_mul(m) else {
+        return -1;
+    };
+    let bitset_bytes = (total_bits >> 3) + usize::from((total_bits & 7) != 0);
+
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Ok(mob_xs) = buf_as_slice::<f32>(&mut env, &mob_xs_buf, m) else { return -1; };
+        let Ok(mob_ys) = buf_as_slice::<f32>(&mut env, &mob_ys_buf, m) else { return -1; };
+        let Ok(mob_zs) = buf_as_slice::<f32>(&mut env, &mob_zs_buf, m) else { return -1; };
+        let Ok(mob_flags) = buf_as_slice::<i32>(&mut env, &mob_flags_buf, m) else {
+            return -1;
+        };
+
+        let Ok(player_xs) = buf_as_slice::<f32>(&mut env, &player_xs_buf, p) else {
+            return -1;
+        };
+        let Ok(player_ys) = buf_as_slice::<f32>(&mut env, &player_ys_buf, p) else {
+            return -1;
+        };
+        let Ok(player_zs) = buf_as_slice::<f32>(&mut env, &player_zs_buf, p) else {
+            return -1;
+        };
+        let Ok(player_look_xs) = buf_as_slice::<f32>(&mut env, &player_look_xs_buf, p) else {
+            return -1;
+        };
+        let Ok(player_look_ys) = buf_as_slice::<f32>(&mut env, &player_look_ys_buf, p) else {
+            return -1;
+        };
+        let Ok(player_look_zs) = buf_as_slice::<f32>(&mut env, &player_look_zs_buf, p) else {
+            return -1;
+        };
+
+        let Ok(hidden_bitset) =
+            buf_as_mut_slice::<u8>(&mut env, &visibility_bitset_buf, bitset_bytes)
+        else {
+            return -1;
+        };
+        let Ok(out_delta_player_idx) =
+            buf_as_mut_slice::<i32>(&mut env, &out_delta_player_idx_buf, max_d)
+        else {
+            return -1;
+        };
+        let Ok(out_delta_mob_idx) =
+            buf_as_mut_slice::<i32>(&mut env, &out_delta_mob_idx_buf, max_d)
+        else {
+            return -1;
+        };
+        let Ok(out_delta_action) =
+            buf_as_mut_slice::<i32>(&mut env, &out_delta_action_buf, max_d)
+        else {
+            return -1;
+        };
+        let Ok(out_stats) = buf_as_mut_slice::<i32>(&mut env, &out_stats_buf, 4) else {
+            return -1;
+        };
+
+        crate::run_in_pool(|| {
+            mob_tracker::compute_mob_tracking(
+                mob_xs,
+                mob_ys,
+                mob_zs,
+                mob_flags,
+                player_xs,
+                player_ys,
+                player_zs,
+                player_look_xs,
+                player_look_ys,
+                player_look_zs,
+                max_track_range,
+                safety_near_range,
+                max_vertical_delta,
+                rear_cull_range,
+                rear_cull_dot_threshold,
+                max_mobs_per_player,
+                brain_state_code,
+                hidden_bitset,
+                out_delta_player_idx,
+                out_delta_mob_idx,
+                out_delta_action,
+                out_stats,
             )
         })
     }))

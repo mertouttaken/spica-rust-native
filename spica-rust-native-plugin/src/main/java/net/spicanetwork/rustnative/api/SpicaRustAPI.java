@@ -516,6 +516,144 @@ public final class SpicaRustAPI {
         );
     }
 
+    /**
+     * Evaluates per-player mob visibility (distance, vertical delta, rear-FOV cone, and per-player
+     * Top-K budget) in parallel zero-copy Rust and emits only state-transition deltas compared
+     * against {@code visibilityBitset} ({@code 1} = currently hidden, {@code 0} = currently visible).
+     *
+     * All ByteBuffers MUST be non-null direct ByteBuffers in native byte order.
+     */
+    public int computeMobTracking(
+        int mobCount,
+        ByteBuffer mobXs,
+        ByteBuffer mobYs,
+        ByteBuffer mobZs,
+        ByteBuffer mobFlags,
+        int playerCount,
+        ByteBuffer playerXs,
+        ByteBuffer playerYs,
+        ByteBuffer playerZs,
+        ByteBuffer playerLookXs,
+        ByteBuffer playerLookYs,
+        ByteBuffer playerLookZs,
+        float maxTrackRange,
+        float safetyNearRange,
+        float maxVerticalDelta,
+        float rearCullRange,
+        float rearCullDotThreshold,
+        int maxMobsPerPlayer,
+        int brainStateCode,
+        ByteBuffer visibilityBitset,
+        int maxDeltas,
+        ByteBuffer outDeltaPlayerIdx,
+        ByteBuffer outDeltaMobIdx,
+        ByteBuffer outDeltaAction,
+        ByteBuffer outStats
+    ) {
+        ensureLoaded();
+        if (mobCount <= 0 || playerCount <= 0) {
+            return 0;
+        }
+
+        requireDirectBuffer(mobXs, "mobXs");
+        requireDirectBuffer(mobYs, "mobYs");
+        requireDirectBuffer(mobZs, "mobZs");
+        requireDirectBuffer(mobFlags, "mobFlags");
+        requireDirectBuffer(playerXs, "playerXs");
+        requireDirectBuffer(playerYs, "playerYs");
+        requireDirectBuffer(playerZs, "playerZs");
+        requireDirectBuffer(playerLookXs, "playerLookXs");
+        requireDirectBuffer(playerLookYs, "playerLookYs");
+        requireDirectBuffer(playerLookZs, "playerLookZs");
+        requireDirectBuffer(visibilityBitset, "visibilityBitset");
+        requireDirectBuffer(outDeltaPlayerIdx, "outDeltaPlayerIdx");
+        requireDirectBuffer(outDeltaMobIdx, "outDeltaMobIdx");
+        requireDirectBuffer(outDeltaAction, "outDeltaAction");
+        requireDirectBuffer(outStats, "outStats");
+
+        long mobBytes = (long) mobCount * Float.BYTES;
+        if (mobXs.capacity() < mobBytes
+            || mobYs.capacity() < mobBytes
+            || mobZs.capacity() < mobBytes
+            || mobFlags.capacity() < mobBytes) {
+            throw new IllegalArgumentException("Mob SoA ByteBuffers are smaller than mobCount * 4 bytes.");
+        }
+
+        long playerBytes = (long) playerCount * Float.BYTES;
+        if (playerXs.capacity() < playerBytes
+            || playerYs.capacity() < playerBytes
+            || playerZs.capacity() < playerBytes
+            || playerLookXs.capacity() < playerBytes
+            || playerLookYs.capacity() < playerBytes
+            || playerLookZs.capacity() < playerBytes) {
+            throw new IllegalArgumentException("Player SoA ByteBuffers are smaller than playerCount * 4 bytes.");
+        }
+
+        long totalPairs = (long) playerCount * (long) mobCount;
+        long neededBitsetBytes = (totalPairs + 7L) >>> 3;
+        if (visibilityBitset.capacity() < neededBitsetBytes) {
+            throw new IllegalArgumentException("visibilityBitset is smaller than ceil(playerCount * mobCount / 8) bytes.");
+        }
+
+        int safeMaxDeltas = Math.max(0, maxDeltas);
+        long deltaBytes = (long) safeMaxDeltas * Integer.BYTES;
+        if (outDeltaPlayerIdx.capacity() < deltaBytes
+            || outDeltaMobIdx.capacity() < deltaBytes
+            || outDeltaAction.capacity() < deltaBytes) {
+            throw new IllegalArgumentException("Output delta ByteBuffers are smaller than maxDeltas * 4 bytes.");
+        }
+
+        if (outStats.capacity() < 4 * Integer.BYTES) {
+            throw new IllegalArgumentException("outStats ByteBuffer must be at least 16 bytes (4 ints).");
+        }
+
+        float safeMaxTrack = Float.isFinite(maxTrackRange) && maxTrackRange > 1.0f ? maxTrackRange : 48.0f;
+        float safeNear = Float.isFinite(safetyNearRange) && safetyNearRange >= 0.0f
+            ? Math.min(safetyNearRange, safeMaxTrack)
+            : 12.0f;
+        float safeVert = Float.isFinite(maxVerticalDelta) && maxVerticalDelta > 0.0f ? maxVerticalDelta : 24.0f;
+        float safeRearRange = Float.isFinite(rearCullRange) && rearCullRange >= 0.0f ? rearCullRange : 16.0f;
+        float safeRearDot = Float.isFinite(rearCullDotThreshold)
+            ? Math.clamp(rearCullDotThreshold, -1.0f, 1.0f)
+            : -0.25f;
+        int safeMaxMobs = Math.max(1, maxMobsPerPlayer);
+        int safeState = Math.clamp(brainStateCode, BrainDirective.STATE_GREEN, BrainDirective.STATE_EMERGENCY);
+
+        return RustNative.nativeComputeMobTracking(
+            mobCount,
+            mobXs,
+            mobYs,
+            mobZs,
+            mobFlags,
+            playerCount,
+            playerXs,
+            playerYs,
+            playerZs,
+            playerLookXs,
+            playerLookYs,
+            playerLookZs,
+            safeMaxTrack,
+            safeNear,
+            safeVert,
+            safeRearRange,
+            safeRearDot,
+            safeMaxMobs,
+            safeState,
+            visibilityBitset,
+            safeMaxDeltas,
+            outDeltaPlayerIdx,
+            outDeltaMobIdx,
+            outDeltaAction,
+            outStats
+        );
+    }
+
+    private static void requireDirectBuffer(ByteBuffer buf, String name) {
+        if (buf == null || !buf.isDirect()) {
+            throw new IllegalArgumentException(name + " must be a non-null direct ByteBuffer.");
+        }
+    }
+
     private void ensureLoaded() {
         if (!NativeLoader.isLoaded()) {
             throw new IllegalStateException("Spica Rust native kutuphanesi yuklu degil.");

@@ -1,7 +1,9 @@
 package net.spicanetwork.rustnative.benchmark;
 
 import net.spicanetwork.rustnative.api.SpicaRustAPI;
+import net.spicanetwork.rustnative.brain.BrainDirective;
 import net.spicanetwork.rustnative.nativebridge.EntityBatchArena;
+import net.spicanetwork.rustnative.nativebridge.RustNative;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -55,14 +57,23 @@ public final class BridgeBenchmark {
         double noiseMs,
         int noiseSamples,
         float noiseMinHeight,
-        float noiseMaxHeight
+        float noiseMaxHeight,
+        int trackingPlayers,
+        int trackingMobs,
+        int trackingIterations,
+        double trackingMs,
+        int trackingHiddenPairs,
+        int trackingVisiblePairs,
+        int trackingBudgetCulled,
+        int trackingDeltas
     ) {
     }
 
     /**
-     * Benchmarks the v2.3.0 Rust native kernels asynchronously:
+     * Benchmarks the v2.4.0 Rust native kernels asynchronously:
      * 1. 128x128 Dijkstra Flow-Field Pathfinding with an obstacle wall
      * 2. 256x256 4-octave FBM WorldGen Noise (65,536 blocks)
+     * 3. Mob Visibility & Tracking Optimizer (100 players x 2,000 mobs = 200,000 pairs)
      */
     public static KernelBenchmarkReport runKernelsBenchmark(SpicaRustAPI api) {
         final int flowW = 128;
@@ -165,6 +176,102 @@ public final class BridgeBenchmark {
         if (!Float.isFinite(minH)) minH = 0.0f;
         if (!Float.isFinite(maxH)) maxH = 0.0f;
 
+        // 3) Mob Visibility & Tracking Optimizer (100 players x 2,000 mobs = 200,000 pairs)
+        final int trackPlayers = 100;
+        final int trackMobs = 2_000;
+        final int trackIters = 20;
+        final int trackMaxDeltas = 2_048;
+        final int trackBitsetBytes = ((trackPlayers * trackMobs) + 7) >>> 3;
+
+        ByteBuffer mobXsBuf = ByteBuffer.allocateDirect(trackMobs * Float.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer mobYsBuf = ByteBuffer.allocateDirect(trackMobs * Float.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer mobZsBuf = ByteBuffer.allocateDirect(trackMobs * Float.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer mobFlagsBuf = ByteBuffer.allocateDirect(trackMobs * Integer.BYTES).order(ByteOrder.nativeOrder());
+
+        ByteBuffer pXsBuf = ByteBuffer.allocateDirect(trackPlayers * Float.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer pYsBuf = ByteBuffer.allocateDirect(trackPlayers * Float.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer pZsBuf = ByteBuffer.allocateDirect(trackPlayers * Float.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer pLookXsBuf = ByteBuffer.allocateDirect(trackPlayers * Float.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer pLookYsBuf = ByteBuffer.allocateDirect(trackPlayers * Float.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer pLookZsBuf = ByteBuffer.allocateDirect(trackPlayers * Float.BYTES).order(ByteOrder.nativeOrder());
+
+        ByteBuffer visBitsetBuf = ByteBuffer.allocateDirect(trackBitsetBytes).order(ByteOrder.nativeOrder());
+        ByteBuffer outDeltaP = ByteBuffer.allocateDirect(trackMaxDeltas * Integer.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer outDeltaM = ByteBuffer.allocateDirect(trackMaxDeltas * Integer.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer outDeltaAct = ByteBuffer.allocateDirect(trackMaxDeltas * Integer.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer outStatsBuf = ByteBuffer.allocateDirect(4 * Integer.BYTES).order(ByteOrder.nativeOrder());
+
+        FloatBuffer mobXs = mobXsBuf.asFloatBuffer();
+        FloatBuffer mobYs = mobYsBuf.asFloatBuffer();
+        FloatBuffer mobZs = mobZsBuf.asFloatBuffer();
+        IntBuffer mobFlags = mobFlagsBuf.asIntBuffer();
+
+        FloatBuffer pXs = pXsBuf.asFloatBuffer();
+        FloatBuffer pYs = pYsBuf.asFloatBuffer();
+        FloatBuffer pZs = pZsBuf.asFloatBuffer();
+        FloatBuffer pLookXs = pLookXsBuf.asFloatBuffer();
+        FloatBuffer pLookYs = pLookYsBuf.asFloatBuffer();
+        FloatBuffer pLookZs = pLookZsBuf.asFloatBuffer();
+        IntBuffer outStats = outStatsBuf.asIntBuffer();
+
+        SplittableRandom trackRng = new SplittableRandom(0x51CA2400L);
+        for (int i = 0; i < trackMobs; i++) {
+            int cluster = i % 16;
+            float cx = (cluster % 4) * 64.0f;
+            float cz = (cluster / 4) * 64.0f;
+            mobXs.put(i, cx + (float) (trackRng.nextDouble() * 48.0));
+            mobYs.put(i, 32.0f + (float) (trackRng.nextDouble() * 64.0));
+            mobZs.put(i, cz + (float) (trackRng.nextDouble() * 48.0));
+
+            int flag = (i % 2 == 0) ? RustNative.TRACK_FLAG_HOSTILE : RustNative.TRACK_FLAG_PASSIVE;
+            if (i % 25 == 0) {
+                flag |= RustNative.TRACK_FLAG_ALWAYS_VISIBLE;
+            }
+            mobFlags.put(i, flag);
+        }
+
+        for (int p = 0; p < trackPlayers; p++) {
+            pXs.put(p, (float) (trackRng.nextDouble() * 256.0));
+            pYs.put(p, 64.0f + (float) ((trackRng.nextDouble() - 0.5) * 16.0));
+            pZs.put(p, (float) (trackRng.nextDouble() * 256.0));
+
+            double yaw = trackRng.nextDouble() * Math.PI * 2.0;
+            double pitch = (trackRng.nextDouble() - 0.5) * 0.6;
+            float cosP = (float) Math.cos(pitch);
+            pLookXs.put(p, (float) (-Math.sin(yaw) * cosP));
+            pLookYs.put(p, (float) (-Math.sin(pitch)));
+            pLookZs.put(p, (float) (Math.cos(yaw) * cosP));
+        }
+
+        // Warmup Mob Tracking kernel
+        for (int w = 0; w < 3; w++) {
+            clearDirectBuffer(visBitsetBuf, trackBitsetBytes);
+            api.computeMobTracking(
+                trackMobs, mobXsBuf, mobYsBuf, mobZsBuf, mobFlagsBuf,
+                trackPlayers, pXsBuf, pYsBuf, pZsBuf, pLookXsBuf, pLookYsBuf, pLookZsBuf,
+                48.0f, 12.0f, 24.0f, 16.0f, -0.25f, 72, BrainDirective.STATE_GREEN,
+                visBitsetBuf, trackMaxDeltas, outDeltaP, outDeltaM, outDeltaAct, outStatsBuf
+            );
+        }
+
+        long trackNanos = 0L;
+        int trackDeltas = 0;
+        for (int k = 0; k < trackIters; k++) {
+            clearDirectBuffer(visBitsetBuf, trackBitsetBytes);
+            long tTrackStart = System.nanoTime();
+            trackDeltas = api.computeMobTracking(
+                trackMobs, mobXsBuf, mobYsBuf, mobZsBuf, mobFlagsBuf,
+                trackPlayers, pXsBuf, pYsBuf, pZsBuf, pLookXsBuf, pLookYsBuf, pLookZsBuf,
+                48.0f, 12.0f, 24.0f, 16.0f, -0.25f, 72, BrainDirective.STATE_GREEN,
+                visBitsetBuf, trackMaxDeltas, outDeltaP, outDeltaM, outDeltaAct, outStatsBuf
+            );
+            trackNanos += (System.nanoTime() - tTrackStart);
+        }
+        double trackingMs = trackNanos / 1_000_000.0 / trackIters;
+        int trackHidden = Math.max(0, outStats.get(0));
+        int trackVisible = Math.max(0, outStats.get(1));
+        int trackBudgetCulled = Math.max(0, outStats.get(3));
+
         return new KernelBenchmarkReport(
             flowW,
             flowD,
@@ -180,8 +287,29 @@ public final class BridgeBenchmark {
             noiseMs,
             noiseSamples,
             minH,
-            maxH
+            maxH,
+            trackPlayers,
+            trackMobs,
+            trackIters,
+            trackingMs,
+            trackHidden,
+            trackVisible,
+            trackBudgetCulled,
+            Math.max(0, trackDeltas)
         );
+    }
+
+    private static void clearDirectBuffer(ByteBuffer buf, int length) {
+        int idx = 0;
+        int longLimit = length & ~7;
+        while (idx < longLimit) {
+            buf.putLong(idx, 0L);
+            idx += 8;
+        }
+        while (idx < length) {
+            buf.put(idx, (byte) 0);
+            idx++;
+        }
     }
 
     public static BenchmarkReport run(SpicaRustAPI api, int entities, int players, int iterations) {

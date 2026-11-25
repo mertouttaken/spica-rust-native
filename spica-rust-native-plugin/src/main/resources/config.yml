@@ -1,4 +1,4 @@
-# SpicaRustNative 2.3.0 (Purpur 1.21.4 Core + Rust Brain + Farm Governor + Surge/Explosion Guard) Yapilandirmasi
+# SpicaRustNative 2.4.0 (Purpur 1.21.4 Core + Rust Brain + Farm Governor + Surge Guard + Mob Tracking Optimizer) Yapilandirmasi
 native:
   # 0 = Otomatik (max(2, cekirdek/2), en fazla 8). Main thread + Netty + GC icin bosluk birakir.
   worker-threads: 0
@@ -111,3 +111,36 @@ surge-guard:
     min-blocks-trigger: 8
     # Patlama sonrasi esya birlestirme yaricapi (blok).
     merge-radius: 5.0
+
+mob-tracking:
+  # Rust destekli canli Mob Gorunurluk & Paket Takip Optimizasyonu (Paper hideEntity/showEntity, ZERO NMS).
+  # Gizlenen moblar Purpur'un TrackedEntity.seenBy listesinden duser -> ag paketi ve CPU tasarrufu saglar.
+  enabled: true
+  # Kac tick'te bir gorunurluk guncellensin (6 tick = 3.3x/sn, titremesiz akici tepki).
+  interval-ticks: 6
+  # Maksimum mob takip menzili (blok; YELLOW/ORANGE/RED/EMERGENCY altinda dinamik olarak daraltilir).
+  max-track-range: 48.0
+  # Guvenlik yakin menzili (blok; bu mesafedeki moblar her zaman gorunur kalir).
+  safety-near-range: 12.0
+  # Maksimum dikey mesafe farki (blok; yeralti magara veya yuksek gokyuzu moblarini gizler).
+  max-vertical-delta: 24.0
+  # Arka gorunurluk kesme menzili (blok; bu mesafeden uzak ve oyuncunun arkasinda kalan moblar gizlenir).
+  rear-cull-range: 16.0
+  # Arka gorunurluk dot-product esigi (-0.25 ~= cos(104 derece): oyuncunun tamamen arkasi).
+  rear-cull-dot-threshold: -0.25
+  # Oyuncu basina maksimum gorunur mob butcesi (Top-K oncelik: dusman moblar ciftlik moblarina onceliklidir).
+  max-mobs-per-player: 72
+  # Tick basina uygulanacak maksimum hide/show gecis paketi (paket patlamalarini yumusatir).
+  max-deltas-per-tick: 512
+  # Isim etiketli (Nametag) moblar her zaman gorunur kalir.
+  always-visible-named: true
+  # Evcil (Tamed) hayvanlar her zaman gorunur kalir.
+  always-visible-tamed: true
+  # Her zaman gorunur kalacak boss ve kritik mob turleri.
+  always-visible-types:
+    - ENDER_DRAGON
+    - WITHER
+    - WARDEN
+    - ELDER_GUARDIAN
+    - VILLAGER
+    - IRON_GOLEM

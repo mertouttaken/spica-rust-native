@@ -254,7 +254,13 @@ pub fn render_prometheus_metrics(s: &BrainSnapshot) -> String {
          spica_elytra_clamps_total {}\n\
          # HELP spica_explosion_items_merged_total Cumulative dropped items pre-merged by Explosion Guard.\n\
          # TYPE spica_explosion_items_merged_total counter\n\
-         spica_explosion_items_merged_total {}\n",
+         spica_explosion_items_merged_total {}\n\
+         # HELP spica_tracked_pairs_hidden Total player-mob tracking pairs currently culled by Rust Mob Tracking Optimizer.\n\
+         # TYPE spica_tracked_pairs_hidden gauge\n\
+         spica_tracked_pairs_hidden {}\n\
+         # HELP spica_tracking_transitions_per_sec Mob visibility hide/show delta transitions per second.\n\
+         # TYPE spica_tracking_transitions_per_sec gauge\n\
+         spica_tracking_transitions_per_sec {}\n",
         s.mspt,
         s.ewma_mspt,
         s.tps,
@@ -274,6 +280,8 @@ pub fn render_prometheus_metrics(s: &BrainSnapshot) -> String {
         s.uptime_secs,
         s.elytra_clamps,
         s.explosion_items_merged,
+        s.tracked_pairs_hidden,
+        s.tracking_transitions_per_sec,
     )
 }
 
@@ -296,6 +304,8 @@ mod tests {
             villagers_throttled: 18,
             elytra_clamps: 7,
             explosion_items_merged: 315,
+            tracked_pairs_hidden: 1240,
+            tracking_transitions_per_sec: 64,
             players: 12,
             loaded_chunks: 1200,
             heap_used_mb: 2048,
@@ -318,6 +328,10 @@ mod tests {
             "spica_elytra_clamps_total 7",
             "# TYPE spica_explosion_items_merged_total counter",
             "spica_explosion_items_merged_total 315",
+            "# TYPE spica_tracked_pairs_hidden gauge",
+            "spica_tracked_pairs_hidden 1240",
+            "# TYPE spica_tracking_transitions_per_sec gauge",
+            "spica_tracking_transitions_per_sec 64",
         ] {
             assert!(text.contains(metric), "Missing metric: {}", metric);
         }
@@ -348,6 +362,8 @@ mod tests {
             villagers_throttled: 6,
             elytra_clamps: 3,
             explosion_items_merged: 95,
+            tracked_pairs_hidden: 860,
+            tracking_transitions_per_sec: 42,
             players: 8,
             loaded_chunks: 900,
             heap_used_mb: 1800,
@@ -366,6 +382,8 @@ mod tests {
         assert_eq!(parsed["snapshot"]["farmThrottled"], 12);
         assert_eq!(parsed["snapshot"]["elytraClamps"], 3);
         assert_eq!(parsed["snapshot"]["explosionItemsMerged"], 95);
+        assert_eq!(parsed["snapshot"]["trackedPairsHidden"], 860);
+        assert_eq!(parsed["snapshot"]["trackingTransitionsPerSec"], 42);
         let hist_arr = parsed["history"]
             .as_array()
             .expect("history must be a JSON array");

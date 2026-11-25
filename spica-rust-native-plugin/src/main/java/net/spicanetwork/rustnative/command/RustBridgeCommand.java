@@ -9,6 +9,7 @@ import net.spicanetwork.rustnative.brain.BrainDirective;
 import net.spicanetwork.rustnative.nativebridge.NativeLoader;
 import net.spicanetwork.rustnative.optimizer.EntityLodOptimizer;
 import net.spicanetwork.rustnative.optimizer.FarmVillagerGovernor;
+import net.spicanetwork.rustnative.optimizer.MobTrackingOptimizer;
 import net.spicanetwork.rustnative.optimizer.SurgeExplosionGuard;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -42,6 +43,7 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
             case "brain" -> handleBrain(sender);
             case "farms" -> handleFarms(sender);
             case "surge" -> handleSurge(sender);
+            case "tracking" -> handleTracking(sender);
             case "kernels" -> handleKernels(sender);
             case "chunks" -> handleChunks(sender, args);
             case "bench" -> handleBench(sender, args);
@@ -56,10 +58,11 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
         EntityLodOptimizer opt = plugin.getOptimizer();
         FarmVillagerGovernor farms = plugin.getFarmGovernor();
         SurgeExplosionGuard surge = plugin.getSurgeGuard();
+        MobTrackingOptimizer tracking = plugin.getMobTrackingOptimizer();
         BrainActuator brain = plugin.getBrainActuator();
         BrainDirective dir = brain != null ? brain.getLastDirective() : null;
 
-        sender.sendMessage(Component.text("=== SpicaRustNative v2.3.0 Durum ===", NamedTextColor.GOLD));
+        sender.sendMessage(Component.text("=== SpicaRustNative v2.4.0 Durum ===", NamedTextColor.GOLD));
         sender.sendMessage(Component.text("Platform: " + NativeLoader.detectPlatformKey(), NamedTextColor.GRAY));
         sender.sendMessage(Component.text("Native Engine: " + plugin.getApi().getNativeInfo(), NamedTextColor.AQUA));
         sender.sendMessage(Component.text("Kutuphane: " + NativeLoader.getLoadedPath(), NamedTextColor.DARK_GRAY));
@@ -101,6 +104,20 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
                     surge.getExplosionItemsMergedTotal()
                 ),
                 NamedTextColor.LIGHT_PURPLE
+            ));
+        }
+        if (tracking != null) {
+            sender.sendMessage(Component.text(
+                String.format(
+                    Locale.US,
+                    "Mob Tracking: %s | Rust: %.3f ms | Gizli Cift: %d | Gorunur: %d | Gecis/sn: %d",
+                    tracking.isEnabled() ? "AKTIF" : "KAPALI",
+                    tracking.getLastRustMs(),
+                    tracking.getLastTotalHiddenPairs(),
+                    tracking.getLastTotalVisiblePairs(),
+                    tracking.getRollingTransitionsPerSec()
+                ),
+                NamedTextColor.AQUA
             ));
         }
         if (brain != null) {
@@ -482,6 +499,75 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
         ));
     }
 
+    private void handleTracking(CommandSender sender) {
+        MobTrackingOptimizer tracking = plugin.getMobTrackingOptimizer();
+        if (tracking == null) {
+            sender.sendMessage(Component.text("Mob Tracking Optimizer modulu baslatilmadi.", NamedTextColor.RED));
+            return;
+        }
+
+        int stateCode = tracking.getLastBrainStateCode();
+        String stateName = BrainDirective.stateNameForCode(stateCode);
+
+        sender.sendMessage(Component.text("=== SpicaRustNative Mob Visibility & Tracking Optimizer ===", NamedTextColor.GOLD));
+        sender.sendMessage(Component.text(
+            String.format(
+                Locale.US,
+                "Durum: %s | Rust Hesaplama: %.3f ms (Toplam: %.3f ms) | Periyot: %d tick",
+                tracking.isEnabled() ? "AKTIF" : "KAPALI",
+                tracking.getLastRustMs(),
+                tracking.getLastRunMs(),
+                tracking.getIntervalTicks()
+            ),
+            tracking.isEnabled() ? NamedTextColor.GREEN : NamedTextColor.RED
+        ));
+        sender.sendMessage(Component.text(
+            String.format(
+                Locale.US,
+                "Gizli Cift: %d | Gorunur Cift: %d | Butce Kesimi (Top-K): %d",
+                tracking.getLastTotalHiddenPairs(),
+                tracking.getLastTotalVisiblePairs(),
+                tracking.getLastCulledByBudget()
+            ),
+            NamedTextColor.AQUA
+        ));
+        sender.sendMessage(Component.text(
+            String.format(
+                Locale.US,
+                "Gecis Hizi: %d /sn | Son Tick Delta: %d | Toplam Gecis: %d (Limit: %d/tick)",
+                tracking.getRollingTransitionsPerSec(),
+                tracking.getLastDeltasApplied(),
+                tracking.getTotalTransitionsApplied(),
+                tracking.getMaxDeltasPerTick()
+            ),
+            NamedTextColor.YELLOW
+        ));
+        sender.sendMessage(Component.text(
+            String.format(
+                Locale.US,
+                "Efektif Menziller (Brain=%s): MaxTakip=%.1f (baz=%.1f) | YakinGuven=%.1f | Dikey=%.1f (baz=%.1f)",
+                stateName,
+                tracking.getEffectiveMaxTrackRange(),
+                tracking.getMaxTrackRange(),
+                tracking.getSafetyNearRange(),
+                tracking.getEffectiveMaxVerticalDelta(),
+                tracking.getMaxVerticalDelta()
+            ),
+            colorForState(stateCode)
+        ));
+        sender.sendMessage(Component.text(
+            String.format(
+                Locale.US,
+                "Arka FOV Kesimi: %.1f blok (dot<=%.2f) | Oyuncu Basina Cap: %d mob (baz=%d)",
+                tracking.getEffectiveRearCullRange(),
+                tracking.getRearCullDotThreshold(),
+                tracking.getEffectiveMaxMobsPerPlayer(),
+                tracking.getMaxMobsPerPlayer()
+            ),
+            NamedTextColor.LIGHT_PURPLE
+        ));
+    }
+
     private void handleKernels(CommandSender sender) {
         if (!plugin.getApi().isNativeLoaded()) {
             sender.sendMessage(Component.text("Rust native kutuphanesi yuklu degil!", NamedTextColor.RED));
@@ -489,7 +575,7 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
         }
 
         sender.sendMessage(Component.text(
-            "Async Rust kernel benchmark baslatildi (128x128 Flow-Field + 256x256 4-Oktav FBM Noise)...",
+            "Async Rust kernel benchmark baslatildi (128x128 Flow-Field + 256x256 FBM Noise + 100x2000 Mob Tracking)...",
             NamedTextColor.YELLOW
         ));
 
@@ -497,7 +583,7 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
             try {
                 BridgeBenchmark.KernelBenchmarkReport r = BridgeBenchmark.runKernelsBenchmark(plugin.getApi());
                 Bukkit.getScheduler().runTask(plugin, () -> {
-                    sender.sendMessage(Component.text("=== Rust Native Kernels Benchmark (v2.3.0) ===", NamedTextColor.GOLD));
+                    sender.sendMessage(Component.text("=== Rust Native Kernels Benchmark (v2.4.0) ===", NamedTextColor.GOLD));
                     sender.sendMessage(Component.text(
                         String.format(
                             Locale.US,
@@ -534,6 +620,22 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
                         ),
                         NamedTextColor.AQUA
                     ));
+                    sender.sendMessage(Component.text(
+                        String.format(
+                            Locale.US,
+                            "[Mob Tracking %dp x %dm] Rust (%d cift): %.3f ms/calisma (%d iter | gizli: %d | gorunur: %d | butce: %d | delta: %d)",
+                            r.trackingPlayers(),
+                            r.trackingMobs(),
+                            r.trackingPlayers() * r.trackingMobs(),
+                            r.trackingMs(),
+                            r.trackingIterations(),
+                            r.trackingHiddenPairs(),
+                            r.trackingVisiblePairs(),
+                            r.trackingBudgetCulled(),
+                            r.trackingDeltas()
+                        ),
+                        NamedTextColor.LIGHT_PURPLE
+                    ));
                 });
             } catch (Throwable t) {
                 Bukkit.getScheduler().runTask(plugin, () -> sender.sendMessage(Component.text(
@@ -550,12 +652,13 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
     }
 
     private void sendHelp(CommandSender sender) {
-        sender.sendMessage(Component.text("=== SpicaRustNative v2.3.0 Komutlari ===", NamedTextColor.GOLD));
-        sender.sendMessage(Component.text("/rustbridge status - Native motor, Brain, Farm, Surge ve optimizer durumu", NamedTextColor.GRAY));
+        sender.sendMessage(Component.text("=== SpicaRustNative v2.4.0 Komutlari ===", NamedTextColor.GOLD));
+        sender.sendMessage(Component.text("/rustbridge status - Native motor, Brain, Farm, Surge, Mob Tracking ve optimizer durumu", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge brain - Rust Brain (IPC/In-Process) canli direktif ve metrikler", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge farms - Mob farm & koylu (trading hall) governor durumu", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge surge - Elytra/Chunk Surge Guard ve Patlama tampon metrikleri", NamedTextColor.GRAY));
-        sender.sendMessage(Component.text("/rustbridge kernels - Async 128x128 Flow-Field + 256x256 FBM Noise testi", NamedTextColor.GRAY));
+        sender.sendMessage(Component.text("/rustbridge tracking - Rust Mob Gorunurluk & Paket Takip (hideEntity/showEntity) durumu", NamedTextColor.GRAY));
+        sender.sendMessage(Component.text("/rustbridge kernels - Async 128x128 Flow-Field + 256x256 FBM Noise + 200k Mob Tracking testi", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge chunks [dunya] - Rust O(N) en yogun Top 8 chunk haritasi", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge bench [entity] [oyuncu] [iter] - Java vs Rust MSPT testi", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge scan [dunya] - Canli mob sikismasi / farm taramasi", NamedTextColor.GRAY));
@@ -597,7 +700,7 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
-            return List.of("status", "brain", "farms", "surge", "kernels", "chunks", "bench", "scan", "reload");
+            return List.of("status", "brain", "farms", "surge", "tracking", "kernels", "chunks", "bench", "scan", "reload");
         }
         if (args.length == 2 && (args[0].equalsIgnoreCase("scan") || args[0].equalsIgnoreCase("chunks"))) {
             return Bukkit.getWorlds().stream().map(World::getName).toList();
