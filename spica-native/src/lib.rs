@@ -13,6 +13,7 @@ pub mod jni_bridge;
 pub mod kernels;
 pub mod mob_tracker;
 pub mod noise;
+pub mod redstone_guard;
 pub mod spatial;
 pub mod surge_guard;
 

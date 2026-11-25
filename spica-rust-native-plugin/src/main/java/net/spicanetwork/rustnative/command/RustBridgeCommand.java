@@ -7,9 +7,11 @@ import net.spicanetwork.rustnative.benchmark.BridgeBenchmark;
 import net.spicanetwork.rustnative.brain.BrainActuator;
 import net.spicanetwork.rustnative.brain.BrainDirective;
 import net.spicanetwork.rustnative.nativebridge.NativeLoader;
+import net.spicanetwork.rustnative.nativebridge.RustNative;
 import net.spicanetwork.rustnative.optimizer.EntityLodOptimizer;
 import net.spicanetwork.rustnative.optimizer.FarmVillagerGovernor;
 import net.spicanetwork.rustnative.optimizer.MobTrackingOptimizer;
+import net.spicanetwork.rustnative.optimizer.RedstoneHopperGovernor;
 import net.spicanetwork.rustnative.optimizer.SurgeExplosionGuard;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -44,6 +46,7 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
             case "farms" -> handleFarms(sender);
             case "surge" -> handleSurge(sender);
             case "tracking" -> handleTracking(sender);
+            case "redstone" -> handleRedstone(sender);
             case "kernels" -> handleKernels(sender);
             case "chunks" -> handleChunks(sender, args);
             case "bench" -> handleBench(sender, args);
@@ -59,10 +62,11 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
         FarmVillagerGovernor farms = plugin.getFarmGovernor();
         SurgeExplosionGuard surge = plugin.getSurgeGuard();
         MobTrackingOptimizer tracking = plugin.getMobTrackingOptimizer();
+        RedstoneHopperGovernor redstone = plugin.getRedstoneGovernor();
         BrainActuator brain = plugin.getBrainActuator();
         BrainDirective dir = brain != null ? brain.getLastDirective() : null;
 
-        sender.sendMessage(Component.text("=== SpicaRustNative v2.4.0 Durum ===", NamedTextColor.GOLD));
+        sender.sendMessage(Component.text("=== SpicaRustNative v2.5.0 Durum ===", NamedTextColor.GOLD));
         sender.sendMessage(Component.text("Platform: " + NativeLoader.detectPlatformKey(), NamedTextColor.GRAY));
         sender.sendMessage(Component.text("Native Engine: " + plugin.getApi().getNativeInfo(), NamedTextColor.AQUA));
         sender.sendMessage(Component.text("Kutuphane: " + NativeLoader.getLoadedPath(), NamedTextColor.DARK_GRAY));
@@ -118,6 +122,20 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
                     tracking.getRollingTransitionsPerSec()
                 ),
                 NamedTextColor.AQUA
+            ));
+        }
+        if (redstone != null) {
+            sender.sendMessage(Component.text(
+                String.format(
+                    Locale.US,
+                    "Redstone Governor: %s | Rust: %.3f ms | Aktif Chunk: %d | Kisitli: %d | Engellenen Op: %d",
+                    redstone.isEnabled() ? "AKTIF" : "KAPALI",
+                    redstone.getLastRustMs(),
+                    redstone.getActiveChunkCount(),
+                    redstone.getThrottledChunkCount(),
+                    redstone.getTotalOpsBlocked()
+                ),
+                redstone.getThrottledChunkCount() > 0 ? NamedTextColor.RED : NamedTextColor.GOLD
             ));
         }
         if (brain != null) {
@@ -568,6 +586,93 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
         ));
     }
 
+    private void handleRedstone(CommandSender sender) {
+        RedstoneHopperGovernor redstone = plugin.getRedstoneGovernor();
+        if (redstone == null) {
+            sender.sendMessage(Component.text("Redstone & Hopper Governor modulu baslatilmadi.", NamedTextColor.RED));
+            return;
+        }
+
+        int stateCode = redstone.getLastBrainStateCode();
+        String stateName = BrainDirective.stateNameForCode(stateCode);
+
+        sender.sendMessage(Component.text("=== SpicaRustNative Redstone & Hopper Governor ===", NamedTextColor.GOLD));
+        sender.sendMessage(Component.text(
+            String.format(
+                Locale.US,
+                "Durum: %s | Rust Hesaplama: %.3f ms (Toplam: %.3f ms) | Oyuncu Koruma: %s | Lockdown Uyari: %s",
+                redstone.isEnabled() ? "AKTIF" : "KAPALI",
+                redstone.getLastRustMs(),
+                redstone.getLastTotalMs(),
+                redstone.isProtectPlayerTriggers() ? "AKTIF" : "KAPALI",
+                redstone.isAlertAdminsOnLockdown() ? "AKTIF" : "KAPALI"
+            ),
+            redstone.isEnabled() ? NamedTextColor.GREEN : NamedTextColor.RED
+        ));
+        sender.sendMessage(Component.text(
+            String.format(
+                Locale.US,
+                "Aktif Chunk: %d | Kisitlanan Chunk: %d | Engellenen: Redstone=%d | Hopper=%d (Toplam=%d)",
+                redstone.getActiveChunkCount(),
+                redstone.getThrottledChunkCount(),
+                redstone.getRedstoneBlockedTotal(),
+                redstone.getHopperBlockedTotal(),
+                redstone.getTotalOpsBlocked()
+            ),
+            NamedTextColor.AQUA
+        ));
+        sender.sendMessage(Component.text(
+            String.format(
+                Locale.US,
+                "Efektif Limitler (Brain=%s): Redstone=%d/sn (baz=%d) | Hopper=%d/sn (baz=%d)",
+                stateName,
+                redstone.getEffectiveRedstoneLimit(),
+                redstone.getRedstoneLimitPerSec(),
+                redstone.getEffectiveHopperLimit(),
+                redstone.getHopperLimitPerSec()
+            ),
+            colorForState(stateCode)
+        ));
+
+        List<RedstoneHopperGovernor.HotRedstoneChunk> hotChunks = redstone.getHotChunks();
+        if (hotChunks.isEmpty()) {
+            sender.sendMessage(Component.text(
+                "En Sicak Top-8 Chunk: Aktif yogun Redstone/Hopper chunk'i tespit edilmedi.",
+                NamedTextColor.GRAY
+            ));
+            return;
+        }
+
+        sender.sendMessage(Component.text("--- En Sicak Top-" + hotChunks.size() + " Redstone/Hopper Chunk ---", NamedTextColor.YELLOW));
+        int rank = 1;
+        for (RedstoneHopperGovernor.HotRedstoneChunk hot : hotChunks) {
+            NamedTextColor rowColor = switch (hot.action()) {
+                case RustNative.REDSTONE_ACTION_LOCKDOWN -> NamedTextColor.RED;
+                case RustNative.REDSTONE_ACTION_THROTTLE_REDSTONE,
+                     RustNative.REDSTONE_ACTION_THROTTLE_HOPPERS -> NamedTextColor.GOLD;
+                default -> NamedTextColor.GREEN;
+            };
+            sender.sendMessage(Component.text(
+                String.format(
+                    Locale.US,
+                    "#%d %s Chunk(%d, %d) | Blok(%d, %d) | RS: %d/s | Hop: %d/s | Heat: %.1f | %s (%d%%)",
+                    rank++,
+                    hot.worldName(),
+                    hot.chunkX(),
+                    hot.chunkZ(),
+                    hot.blockX(),
+                    hot.blockZ(),
+                    hot.redstonePerSec(),
+                    hot.hopperPerSec(),
+                    hot.heat(),
+                    hot.actionName(),
+                    hot.throttlePercent()
+                ),
+                rowColor
+            ));
+        }
+    }
+
     private void handleKernels(CommandSender sender) {
         if (!plugin.getApi().isNativeLoaded()) {
             sender.sendMessage(Component.text("Rust native kutuphanesi yuklu degil!", NamedTextColor.RED));
@@ -583,7 +688,7 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
             try {
                 BridgeBenchmark.KernelBenchmarkReport r = BridgeBenchmark.runKernelsBenchmark(plugin.getApi());
                 Bukkit.getScheduler().runTask(plugin, () -> {
-                    sender.sendMessage(Component.text("=== Rust Native Kernels Benchmark (v2.4.0) ===", NamedTextColor.GOLD));
+                    sender.sendMessage(Component.text("=== Rust Native Kernels Benchmark (v2.5.0) ===", NamedTextColor.GOLD));
                     sender.sendMessage(Component.text(
                         String.format(
                             Locale.US,
@@ -652,12 +757,13 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
     }
 
     private void sendHelp(CommandSender sender) {
-        sender.sendMessage(Component.text("=== SpicaRustNative v2.4.0 Komutlari ===", NamedTextColor.GOLD));
-        sender.sendMessage(Component.text("/rustbridge status - Native motor, Brain, Farm, Surge, Mob Tracking ve optimizer durumu", NamedTextColor.GRAY));
+        sender.sendMessage(Component.text("=== SpicaRustNative v2.5.0 Komutlari ===", NamedTextColor.GOLD));
+        sender.sendMessage(Component.text("/rustbridge status - Native motor, Brain, Farm, Surge, Mob Tracking, Redstone ve optimizer durumu", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge brain - Rust Brain (IPC/In-Process) canli direktif ve metrikler", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge farms - Mob farm & koylu (trading hall) governor durumu", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge surge - Elytra/Chunk Surge Guard ve Patlama tampon metrikleri", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge tracking - Rust Mob Gorunurluk & Paket Takip (hideEntity/showEntity) durumu", NamedTextColor.GRAY));
+        sender.sendMessage(Component.text("/rustbridge redstone - Rust Redstone & Hopper Lag-Machine Governor durumu ve en sicak Top 8 chunk", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge kernels - Async 128x128 Flow-Field + 256x256 FBM Noise + 200k Mob Tracking testi", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge chunks [dunya] - Rust O(N) en yogun Top 8 chunk haritasi", NamedTextColor.GRAY));
         sender.sendMessage(Component.text("/rustbridge bench [entity] [oyuncu] [iter] - Java vs Rust MSPT testi", NamedTextColor.GRAY));
@@ -700,7 +806,7 @@ public final class RustBridgeCommand implements CommandExecutor, TabCompleter {
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
-            return List.of("status", "brain", "farms", "surge", "tracking", "kernels", "chunks", "bench", "scan", "reload");
+            return List.of("status", "brain", "farms", "surge", "tracking", "redstone", "kernels", "chunks", "bench", "scan", "reload");
         }
         if (args.length == 2 && (args[0].equalsIgnoreCase("scan") || args[0].equalsIgnoreCase("chunks"))) {
             return Bukkit.getWorlds().stream().map(World::getName).toList();

@@ -1,4 +1,4 @@
-# SpicaRustNative v2.4 — Purpur 1.21.4 Core + Rust Brain
+# SpicaRustNative v2.5 — Purpur 1.21.4 Core + Rust Brain
 
 > **Execution Core:** Purpur / Paper 1.21.4 (100% compatible with existing Bukkit/Paper/Purpur plugins)  
 > **Brain & Orchestrator:** Rust (`spica-launcher` + `spica-native`)
@@ -24,16 +24,16 @@
 ┌──────────────────────────────────▼─────────────────────────────────────┐
 │  2) SpicaRustNative Plugin (Purpur 1.21.4 Execution Body)              │
 │  • Safely actuates Rust Brain directives onto live worlds:             │
-│    Mob Visibility/Tracking Culling (hideEntity/showEntity), AI LOD,    │
-│    Mob-Farm & Villager Governor, Elytra/Chunk Surge & TNT Item Buffer  │
+│    Mob Tracking Culling, AI LOD, Mob-Farm & Villager Governor,         │
+│    Redstone & Hopper Lag-Machine Governor, Elytra Surge & TNT Buffer   │
 │  • Seamless fallback to in-process Rust Governor if run standalone     │
 └──────────────────────────────────┬─────────────────────────────────────┘
                                    │ Zero-Copy DirectByteBuffer (0 GC)
 ┌──────────────────────────────────▼─────────────────────────────────────┐
 │  3) spica-native (.dll / .so — In-Process Rust Compute Engine)         │
 │  • Flat CSR O(N) Spatial Hash Grid + Rayon work-stealing pool          │
-│  • Parallel Mob Tracking (Cave/FOV/Top-K Budget), Collisions, AI LOD,  │
-│    Farm/Villager Governor, Surge Guard, Boids, Flow-Field, FBM Noise   │
+│  • Mob Tracking, Redstone/Hopper Governor, Farm/Villager Governor,     │
+│    Collisions, AI LOD, Surge Guard, Boids, Flow-Field, FBM Noise       │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -87,9 +87,10 @@ Measured directly inside the running Purpur 1.21.4 JVM (**4 Rayon workers**):
   - Adaptive MSPT Governor evaluation: `4.2 ns/eval`
   - Farm & Villager Governor (5,000 entities × 100 players): `1.657 ms` (`~0.08 ms/tick` amortized at 1s interval)
   - **Parallel Mob Tracking (100 players × 2,000 mobs = 200,000 pairs):** **`1.117 ms`** (`~0.19 ms/tick` amortized at 6-tick interval; Cave + Rear-FOV + Hostile-Priority Top-K Budget + Delta Bitset)
+  - **Redstone & Hopper Governor (2,000 active chunks):** **`0.061 ms/eval`** (asymmetric EWMA heat + smooth fractional drop)
   - 2D Flow-Field Pathfinding (128×128 = 16,384 cells w/ obstacles): `1.869 ms/eval` (O(1) per-mob lookup)
-  - Parallel 4-Octave FBM WorldGen Noise (256×256 = 65,536 blocks): `3.643 ms/eval`
-- **Unit Test Suite:** `46/46` Rust unit tests passing (`spica-launcher`: 16/16, `spica-rust-native`: 30/30)
+  - Parallel 4-Octave FBM WorldGen Noise (256×256 = 65,536 blocks): `2.942 ms/eval`
+- **Unit Test Suite:** `52/52` Rust unit tests passing (`spica-launcher`: 17/17, `spica-rust-native`: 35/35)
 
 ---
 
@@ -113,7 +114,7 @@ Build the entire workspace (native engine, launcher, tests, and Purpur plugin JA
 
 Artifacts are exported to `dist/windows-x86_64/`:
 - `spica-launcher.exe` — Place next to `purpur-1.21.4.jar`
-- `SpicaRustNative-2.4.0.jar` — Place in `plugins/` (`spica_rust_native.dll` is bundled inside)
+- `SpicaRustNative-2.5.0.jar` — Place in `plugins/` (`spica_rust_native.dll` is bundled inside)
 
 Run Purpur under the Rust Brain:
 
@@ -170,6 +171,7 @@ Every push/PR to `main` and version tag (`v*`) runs [`.github/workflows/ci-relea
 | `/rustbridge brain` | Displays Brain mode (`LAUNCHER IPC` / `IN-PROCESS RUST`), health state, EWMA MSPT, live view/sim distance, dynamic AI ranges, and total Rust-merged items. |
 | `/rustbridge farms` | Displays live Mob-Farm & Villager Governor stats: throttled farm mobs, collision-disabled mobs, throttled trading-hall villagers, restock pulse countdown, and active thresholds. |
 | `/rustbridge tracking` | Displays live Rust Mob Tracking stats: hidden/visible/budget-culled `(player, mob)` pairs, delta transitions/sec, and effective Brain-scaled range/cave/FOV/Top-K limits. |
+| `/rustbridge redstone` | Displays live Redstone & Hopper Lag-Machine Governor stats: active/throttled chunks, blocked ops, effective Brain-scaled limits, and Top-8 hottest Redstone/Hopper chunks. |
 | `/rustbridge surge` | Displays live Elytra / Chunk-Load Surge Guard & Explosion Item Buffer stats (chunks/sec, Elytra clamps, buffered explosions, merged debris items). |
 | `/rustbridge kernels` | Runs an **async** live Rust benchmark of 200k-pair Mob Tracking + 128×128 Flow-Field Pathfinding + 256×256 FBM WorldGen Noise inside the running JVM. |
 | `/rustbridge chunks [world]` | Runs the Rust $O(N)$ Chunk Heatmap and lists the Top 8 densest/most crowded chunks with chunk & block coordinates. |

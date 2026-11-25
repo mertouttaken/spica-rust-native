@@ -260,7 +260,13 @@ pub fn render_prometheus_metrics(s: &BrainSnapshot) -> String {
          spica_tracked_pairs_hidden {}\n\
          # HELP spica_tracking_transitions_per_sec Mob visibility hide/show delta transitions per second.\n\
          # TYPE spica_tracking_transitions_per_sec gauge\n\
-         spica_tracking_transitions_per_sec {}\n",
+         spica_tracking_transitions_per_sec {}\n\
+         # HELP spica_redstone_chunks_throttled Total chunks currently throttled by Rust Redstone & Hopper Governor.\n\
+         # TYPE spica_redstone_chunks_throttled gauge\n\
+         spica_redstone_chunks_throttled {}\n\
+         # HELP spica_redstone_ops_blocked_total Cumulative redstone & hopper operations blocked by Rust Redstone Governor.\n\
+         # TYPE spica_redstone_ops_blocked_total counter\n\
+         spica_redstone_ops_blocked_total {}\n",
         s.mspt,
         s.ewma_mspt,
         s.tps,
@@ -282,6 +288,8 @@ pub fn render_prometheus_metrics(s: &BrainSnapshot) -> String {
         s.explosion_items_merged,
         s.tracked_pairs_hidden,
         s.tracking_transitions_per_sec,
+        s.redstone_chunks_throttled,
+        s.redstone_ops_blocked,
     )
 }
 
@@ -306,6 +314,8 @@ mod tests {
             explosion_items_merged: 315,
             tracked_pairs_hidden: 1240,
             tracking_transitions_per_sec: 64,
+            redstone_chunks_throttled: 9,
+            redstone_ops_blocked: 15420,
             players: 12,
             loaded_chunks: 1200,
             heap_used_mb: 2048,
@@ -332,6 +342,10 @@ mod tests {
             "spica_tracked_pairs_hidden 1240",
             "# TYPE spica_tracking_transitions_per_sec gauge",
             "spica_tracking_transitions_per_sec 64",
+            "# TYPE spica_redstone_chunks_throttled gauge",
+            "spica_redstone_chunks_throttled 9",
+            "# TYPE spica_redstone_ops_blocked_total counter",
+            "spica_redstone_ops_blocked_total 15420",
         ] {
             assert!(text.contains(metric), "Missing metric: {}", metric);
         }
@@ -364,6 +378,8 @@ mod tests {
             explosion_items_merged: 95,
             tracked_pairs_hidden: 860,
             tracking_transitions_per_sec: 42,
+            redstone_chunks_throttled: 5,
+            redstone_ops_blocked: 8420,
             players: 8,
             loaded_chunks: 900,
             heap_used_mb: 1800,
@@ -384,6 +400,8 @@ mod tests {
         assert_eq!(parsed["snapshot"]["explosionItemsMerged"], 95);
         assert_eq!(parsed["snapshot"]["trackedPairsHidden"], 860);
         assert_eq!(parsed["snapshot"]["trackingTransitionsPerSec"], 42);
+        assert_eq!(parsed["snapshot"]["redstoneChunksThrottled"], 5);
+        assert_eq!(parsed["snapshot"]["redstoneOpsBlocked"], 8420);
         let hist_arr = parsed["history"]
             .as_array()
             .expect("history must be a JSON array");

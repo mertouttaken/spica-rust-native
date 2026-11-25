@@ -107,6 +107,10 @@ pub struct TelemetryPayload {
     pub tracked_pairs_hidden: u32,
     #[serde(rename = "trackingTransitionsPerSec", default)]
     pub tracking_transitions_per_sec: u32,
+    #[serde(rename = "redstoneChunksThrottled", default)]
+    pub redstone_chunks_throttled: u32,
+    #[serde(rename = "redstoneOpsBlocked", default)]
+    pub redstone_ops_blocked: u64,
     #[serde(default)]
     pub players: u32,
     #[serde(rename = "loadedChunks", default)]
@@ -157,6 +161,8 @@ pub struct BrainSnapshot {
     pub explosion_items_merged: u64,
     pub tracked_pairs_hidden: u32,
     pub tracking_transitions_per_sec: u32,
+    pub redstone_chunks_throttled: u32,
+    pub redstone_ops_blocked: u64,
     pub players: u32,
     pub loaded_chunks: u32,
     pub heap_used_mb: u64,
@@ -205,6 +211,8 @@ pub struct BrainState {
     pub explosion_items_merged: u64,
     pub tracked_pairs_hidden: u32,
     pub tracking_transitions_per_sec: u32,
+    pub redstone_chunks_throttled: u32,
+    pub redstone_ops_blocked: u64,
     pub players: u32,
     pub loaded_chunks: u32,
     pub heap_used_mb: u64,
@@ -318,6 +326,8 @@ impl BrainState {
             explosion_items_merged: 0,
             tracked_pairs_hidden: 0,
             tracking_transitions_per_sec: 0,
+            redstone_chunks_throttled: 0,
+            redstone_ops_blocked: 0,
             players: 0,
             loaded_chunks: 0,
             heap_used_mb: 0,
@@ -411,6 +421,8 @@ impl BrainState {
         self.explosion_items_merged = telemetry.explosion_items_merged;
         self.tracked_pairs_hidden = telemetry.tracked_pairs_hidden;
         self.tracking_transitions_per_sec = telemetry.tracking_transitions_per_sec;
+        self.redstone_chunks_throttled = telemetry.redstone_chunks_throttled;
+        self.redstone_ops_blocked = telemetry.redstone_ops_blocked;
         self.players = telemetry.players;
         self.loaded_chunks = telemetry.loaded_chunks;
         self.heap_used_mb = telemetry.heap_used_mb;
@@ -477,6 +489,8 @@ impl BrainState {
             explosion_items_merged: self.explosion_items_merged,
             tracked_pairs_hidden: self.tracked_pairs_hidden,
             tracking_transitions_per_sec: self.tracking_transitions_per_sec,
+            redstone_chunks_throttled: self.redstone_chunks_throttled,
+            redstone_ops_blocked: self.redstone_ops_blocked,
             players: self.players,
             loaded_chunks: self.loaded_chunks,
             heap_used_mb: self.heap_used_mb,
@@ -511,6 +525,8 @@ mod tests {
             explosion_items_merged: 0,
             tracked_pairs_hidden: 0,
             tracking_transitions_per_sec: 0,
+            redstone_chunks_throttled: 0,
+            redstone_ops_blocked: 0,
             players: 18,
             loaded_chunks: 1600,
             heap_used_mb: 2400,
@@ -791,6 +807,68 @@ mod tests {
     }
 
     #[test]
+    fn test_redstone_governor_telemetry_roundtrip_and_defaults() {
+        let mut brain = BrainState::new(BrainConfig::default(), 4096, 16384);
+
+        // 1. Telemetry containing redstoneChunksThrottled & redstoneOpsBlocked
+        let json_with_redstone = r#"{
+            "type": "telemetry",
+            "mspt": 25.4,
+            "tps": 20.0,
+            "entities": 610,
+            "hibernated": 125,
+            "farmThrottled": 50,
+            "villagersThrottled": 20,
+            "elytraClamps": 4,
+            "explosionItemsMerged": 80,
+            "trackedPairsHidden": 1900,
+            "trackingTransitionsPerSec": 72,
+            "redstoneChunksThrottled": 11,
+            "redstoneOpsBlocked": 48250,
+            "players": 24,
+            "loadedChunks": 1900,
+            "heapUsedMb": 2950,
+            "heapMaxMb": 8192
+        }"#;
+        let payload: TelemetryPayload = serde_json::from_str(json_with_redstone)
+            .expect("deserialize telemetry with redstone governor fields");
+        assert_eq!(payload.redstone_chunks_throttled, 11);
+        assert_eq!(payload.redstone_ops_blocked, 48250);
+
+        let _ = brain.ingest_telemetry(&payload);
+        let snap = brain.snapshot();
+        assert_eq!(snap.redstone_chunks_throttled, 11);
+        assert_eq!(snap.redstone_ops_blocked, 48250);
+
+        let snap_json = serde_json::to_value(&snap).expect("serialize snapshot");
+        assert_eq!(snap_json["redstoneChunksThrottled"], 11);
+        assert_eq!(snap_json["redstoneOpsBlocked"], 48250);
+
+        // 2. Legacy telemetry omitting redstoneChunksThrottled & redstoneOpsBlocked defaults both to 0
+        let legacy_json = r#"{
+            "type": "telemetry",
+            "mspt": 17.5,
+            "tps": 20.0,
+            "entities": 220,
+            "hibernated": 25,
+            "players": 5,
+            "loadedChunks": 700,
+            "heapUsedMb": 1300,
+            "heapMaxMb": 8192
+        }"#;
+        let legacy_payload: TelemetryPayload =
+            serde_json::from_str(legacy_json).expect("deserialize legacy telemetry");
+        assert_eq!(legacy_payload.redstone_chunks_throttled, 0);
+        assert_eq!(legacy_payload.redstone_ops_blocked, 0);
+
+        let _ = brain.ingest_telemetry(&legacy_payload);
+        let legacy_snap_json =
+            serde_json::to_value(&brain.snapshot()).expect("serialize legacy snapshot");
+        assert_eq!(legacy_snap_json["redstoneChunksThrottled"], 0);
+        assert_eq!(legacy_snap_json["redstoneOpsBlocked"], 0);
+    }
+
+    #[test]
     fn test_history_ring_buffer_caps_at_120_and_preserves_newest() {
         let mut brain = BrainState::new(BrainConfig::default(), 4096, 16384);
         brain.update_host_metrics(28.4, 5120, 16384);
@@ -807,6 +885,8 @@ mod tests {
                 explosion_items_merged: (tick as u64) * 2,
                 tracked_pairs_hidden: tick * 4,
                 tracking_transitions_per_sec: tick % 25,
+                redstone_chunks_throttled: tick % 10,
+                redstone_ops_blocked: (tick as u64) * 100,
                 players: 10,
                 loaded_chunks: 1000,
                 heap_used_mb: 2048 + tick as u64,

@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use spica_rust_native::{
     farm_governor, flowfield, governor, heatmap, init_thread_pool, kernels, mob_tracker, noise,
-    run_in_pool,
+    redstone_guard, run_in_pool,
 };
 
 fn lcg_next(state: &mut u64) -> f32 {
@@ -444,9 +444,98 @@ fn main() {
         dt_track, track_stats[0], track_stats[1], track_stats[3]
     );
 
-    let total_ms = dt_coll + dt_ai + dt_boids + dt_heatmap + dt_merge + dt_gov_ms + dt_farm + dt_track;
+    // 11) Redstone & Hopper Governor (2000 chunks)
+    let rs_chunks = 2_000usize;
+    let mut rs_chunk_xs = Vec::with_capacity(rs_chunks);
+    let mut rs_chunk_zs = Vec::with_capacity(rs_chunks);
+    let mut rs_per_sec = Vec::with_capacity(rs_chunks);
+    let mut hop_per_sec = Vec::with_capacity(rs_chunks);
+    let mut rs_prev_heat = vec![0.0f32; rs_chunks];
+    for i in 0..rs_chunks {
+        rs_chunk_xs.push((i % 50) as i32 - 25);
+        rs_chunk_zs.push((i / 50) as i32 - 20);
+        if i % 64 == 0 {
+            // Lag machine chunk (both high redstone & high hopper activity)
+            rs_per_sec.push(520 + (i % 180) as i32);
+            hop_per_sec.push(360 + (i % 120) as i32);
+        } else if i % 16 == 0 {
+            // Moderate redstone farm
+            rs_per_sec.push(180 + (i % 80) as i32);
+            hop_per_sec.push(90 + (i % 50) as i32);
+        } else {
+            // Typical active/quiet chunk
+            rs_per_sec.push((lcg_next(&mut seed) * 60.0) as i32);
+            hop_per_sec.push((lcg_next(&mut seed) * 40.0) as i32);
+        }
+    }
+    let mut rs_out_actions = vec![0i32; rs_chunks];
+    let mut rs_out_heat = vec![0.0f32; rs_chunks];
+    let mut rs_out_ratio = vec![0.0f32; rs_chunks];
+    let mut rs_top_indices = vec![-1i32; 16];
+
+    // Warmup
+    run_in_pool(|| {
+        redstone_guard::evaluate_redstone_chunks(
+            &rs_chunk_xs,
+            &rs_chunk_zs,
+            &rs_per_sec,
+            &hop_per_sec,
+            &rs_prev_heat,
+            200,
+            160,
+            last_state,
+            &mut rs_out_actions,
+            &mut rs_out_heat,
+            &mut rs_out_ratio,
+            &mut rs_top_indices,
+        )
+    });
+    rs_prev_heat.copy_from_slice(&rs_out_heat);
+
+    let t10 = Instant::now();
+    let mut rs_throttled = 0i32;
+    for _ in 0..iterations {
+        rs_throttled = run_in_pool(|| {
+            redstone_guard::evaluate_redstone_chunks(
+                &rs_chunk_xs,
+                &rs_chunk_zs,
+                &rs_per_sec,
+                &hop_per_sec,
+                &rs_prev_heat,
+                200,
+                160,
+                last_state,
+                &mut rs_out_actions,
+                &mut rs_out_heat,
+                &mut rs_out_ratio,
+                &mut rs_top_indices,
+            )
+        });
+        rs_prev_heat.copy_from_slice(&rs_out_heat);
+    }
+    let dt_redstone = t10.elapsed().as_secs_f64() * 1000.0 / (iterations as f64);
+    let hottest_idx = rs_top_indices[0];
+    let hottest_heat = if hottest_idx >= 0 {
+        rs_out_heat[hottest_idx as usize]
+    } else {
+        0.0
+    };
     println!(
-        "\nTotal per-tick budget [1..7, 10]: {:.3} ms / 50.000 ms tick ({:.2}% of 1 tick)",
+        "[11] Redstone & Hopper Governor (2000 chunks): {:.3} ms/tick (throttled: {}/{}, hottest idx: {}, heat: {:.1})",
+        dt_redstone, rs_throttled, rs_chunks, hottest_idx, hottest_heat
+    );
+
+    let total_ms = dt_coll
+        + dt_ai
+        + dt_boids
+        + dt_heatmap
+        + dt_merge
+        + dt_gov_ms
+        + dt_farm
+        + dt_track
+        + dt_redstone;
+    println!(
+        "\nTotal per-tick budget [1..7, 10..11]: {:.3} ms / 50.000 ms tick ({:.2}% of 1 tick)",
         total_ms,
         total_ms / 50.0 * 100.0
     );

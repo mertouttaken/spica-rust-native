@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SpicaRustNative v2.4.0 — Live Telemetry Dashboard</title>
+  <title>SpicaRustNative v2.5.0 — Live Telemetry Dashboard</title>
   <style>
     :root {
       --bg: #0b0f17;
@@ -628,7 +628,7 @@
         <div>
           <div class="brand-title">
             SpicaRustNative
-            <span class="version-pill">v2.4.0</span>
+            <span class="version-pill">v2.5.0</span>
           </div>
           <div class="brand-sub" id="serverMeta">Purpur 1.21.4 Core + Rust Brain</div>
         </div>
@@ -792,6 +792,16 @@
             <span class="sub-badge-val" id="kpiExplosionMerged" style="color:#f97316;">0</span>
           </div>
         </div>
+        <div class="sub-badge-row">
+          <div class="sub-badge">
+            <span class="sub-badge-key">RS Chunks</span>
+            <span class="sub-badge-val" id="kpiRedstoneChunks" style="color:#f43f5e;">0</span>
+          </div>
+          <div class="sub-badge">
+            <span class="sub-badge-key">RS Blocked</span>
+            <span class="sub-badge-val" id="kpiRedstoneBlocked" style="color:#f59e0b;">0</span>
+          </div>
+        </div>
       </article>
 
       <!-- 5. JVM Heap -->
@@ -925,6 +935,8 @@
         kpiVillagersThrottled: $("kpiVillagersThrottled"),
         kpiElytraClamps: $("kpiElytraClamps"),
         kpiExplosionMerged: $("kpiExplosionMerged"),
+        kpiRedstoneChunks: $("kpiRedstoneChunks"),
+        kpiRedstoneBlocked: $("kpiRedstoneBlocked"),
         governorSavedTag: $("governorSavedTag"),
         kpiHeapUsed: $("kpiHeapUsed"),
         kpiHeapMax: $("kpiHeapMax"),
@@ -1090,12 +1102,16 @@
         const villagers = Math.round(num(snap.villagersThrottled, 0));
         const elytraClamps = Math.round(num(snap.elytraClamps, 0));
         const explosionMerged = Math.round(num(snap.explosionItemsMerged, 0));
+        const redstoneChunks = Math.round(num(snap.redstoneChunksThrottled, 0));
+        const redstoneBlocked = Math.round(num(snap.redstoneOpsBlocked, 0));
         const totalGov = hibernated + farmThrottled + villagers;
         els.kpiHibernated.textContent = hibernated.toLocaleString();
         els.kpiFarmThrottled.textContent = farmThrottled.toLocaleString();
         els.kpiVillagersThrottled.textContent = villagers.toLocaleString();
         els.kpiElytraClamps.textContent = elytraClamps.toLocaleString();
         els.kpiExplosionMerged.textContent = explosionMerged.toLocaleString();
+        els.kpiRedstoneChunks.textContent = redstoneChunks.toLocaleString();
+        els.kpiRedstoneBlocked.textContent = redstoneBlocked.toLocaleString();
         els.governorSavedTag.textContent = totalGov.toLocaleString() + " governed";
 
         // 5. JVM Heap

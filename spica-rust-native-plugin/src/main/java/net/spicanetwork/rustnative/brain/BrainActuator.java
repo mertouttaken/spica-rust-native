@@ -5,6 +5,7 @@ import net.spicanetwork.rustnative.nativebridge.EntityBatchArena;
 import net.spicanetwork.rustnative.optimizer.EntityLodOptimizer;
 import net.spicanetwork.rustnative.optimizer.FarmVillagerGovernor;
 import net.spicanetwork.rustnative.optimizer.MobTrackingOptimizer;
+import net.spicanetwork.rustnative.optimizer.RedstoneHopperGovernor;
 import net.spicanetwork.rustnative.optimizer.SurgeExplosionGuard;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -46,6 +47,7 @@ public final class BrainActuator {
     private final FarmVillagerGovernor farmGovernor;
     private final SurgeExplosionGuard surgeGuard;
     private final MobTrackingOptimizer mobTrackingOptimizer;
+    private final RedstoneHopperGovernor redstoneGovernor;
     private final Logger logger;
     private final EntityBatchArena brainArena = new EntityBatchArena(4096, 64);
     private final List<Item> itemScratch = new ArrayList<>(1024);
@@ -89,7 +91,7 @@ public final class BrainActuator {
         BrainIpcClient ipcClient,
         Logger logger
     ) {
-        this(api, optimizer, farmGovernor, null, null, ipcClient, logger);
+        this(api, optimizer, farmGovernor, null, null, null, ipcClient, logger);
     }
 
     public BrainActuator(
@@ -100,7 +102,7 @@ public final class BrainActuator {
         BrainIpcClient ipcClient,
         Logger logger
     ) {
-        this(api, optimizer, farmGovernor, surgeGuard, null, ipcClient, logger);
+        this(api, optimizer, farmGovernor, surgeGuard, null, null, ipcClient, logger);
     }
 
     public BrainActuator(
@@ -112,11 +114,25 @@ public final class BrainActuator {
         BrainIpcClient ipcClient,
         Logger logger
     ) {
+        this(api, optimizer, farmGovernor, surgeGuard, mobTrackingOptimizer, null, ipcClient, logger);
+    }
+
+    public BrainActuator(
+        SpicaRustAPI api,
+        EntityLodOptimizer optimizer,
+        FarmVillagerGovernor farmGovernor,
+        SurgeExplosionGuard surgeGuard,
+        MobTrackingOptimizer mobTrackingOptimizer,
+        RedstoneHopperGovernor redstoneGovernor,
+        BrainIpcClient ipcClient,
+        Logger logger
+    ) {
         this.api = api;
         this.optimizer = optimizer;
         this.farmGovernor = farmGovernor;
         this.surgeGuard = surgeGuard;
         this.mobTrackingOptimizer = mobTrackingOptimizer;
+        this.redstoneGovernor = redstoneGovernor;
         this.ipcClient = ipcClient;
         this.logger = logger;
     }
@@ -175,6 +191,8 @@ public final class BrainActuator {
         long explosionItemsMerged = surgeGuard != null ? surgeGuard.getExplosionItemsMergedTotal() : 0L;
         int trackedPairsHidden = mobTrackingOptimizer != null ? mobTrackingOptimizer.getLastTotalHiddenPairs() : 0;
         int trackingTransitionsPerSec = mobTrackingOptimizer != null ? mobTrackingOptimizer.getRollingTransitionsPerSec() : 0;
+        int redstoneChunksThrottled = redstoneGovernor != null ? redstoneGovernor.getThrottledChunkCount() : 0;
+        long redstoneOpsBlocked = redstoneGovernor != null ? redstoneGovernor.getTotalOpsBlocked() : 0L;
 
         Runtime runtime = Runtime.getRuntime();
         long heapUsedMb = Math.max(0L, (runtime.totalMemory() - runtime.freeMemory()) / (1024L * 1024L));
@@ -194,7 +212,8 @@ public final class BrainActuator {
             ipcClient.submitTelemetry(
                 mspt, tps, loadedEntities, hibernated, onlinePlayers, loadedChunks, heapUsedMb, heapMaxMb,
                 farmThrottled, villagersThrottled, elytraClamps, explosionItemsMerged,
-                trackedPairsHidden, trackingTransitionsPerSec
+                trackedPairsHidden, trackingTransitionsPerSec,
+                redstoneChunksThrottled, redstoneOpsBlocked
             );
             BrainDirective ipcDir = ipcClient.getLatestDirective();
             long ipcAgeMs = System.currentTimeMillis() - ipcClient.getLastDirectiveTimestampMs();

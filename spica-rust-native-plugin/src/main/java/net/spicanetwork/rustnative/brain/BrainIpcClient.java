@@ -28,7 +28,7 @@ import java.util.logging.Logger;
  */
 public final class BrainIpcClient {
 
-    public static final String PLUGIN_VERSION = "2.4.0";
+    public static final String PLUGIN_VERSION = "2.5.0";
     public static final String SERVER_FLAVOR = "purpur-1.21.4";
 
     private static final int CONNECT_TIMEOUT_MS = 3_000;
@@ -179,6 +179,36 @@ public final class BrainIpcClient {
         int trackedPairsHidden,
         int trackingTransitionsPerSec
     ) {
+        submitTelemetry(
+            mspt, tps, entities, hibernated, players, loadedChunks, heapUsedMb, heapMaxMb,
+            farmThrottled, villagersThrottled, elytraClamps, explosionItemsMerged,
+            trackedPairsHidden, trackingTransitionsPerSec, 0, 0L
+        );
+    }
+
+    /**
+     * Non-blocking single-slot telemetry submission including Farm & Villager Governor,
+     * Elytra / Explosion Surge Guard, Mob Visibility & Tracking Optimizer, and
+     * Redstone & Hopper Lag-Machine Governor metrics.
+     */
+    public void submitTelemetry(
+        double mspt,
+        double tps,
+        int entities,
+        int hibernated,
+        int players,
+        int loadedChunks,
+        long heapUsedMb,
+        long heapMaxMb,
+        int farmThrottled,
+        int villagersThrottled,
+        long elytraClamps,
+        long explosionItemsMerged,
+        int trackedPairsHidden,
+        int trackingTransitionsPerSec,
+        int redstoneChunksThrottled,
+        long redstoneOpsBlocked
+    ) {
         if (!enabled || !running.get() || !connected.get()) {
             return;
         }
@@ -199,6 +229,8 @@ public final class BrainIpcClient {
         json.addProperty("explosionItemsMerged", Math.max(0L, explosionItemsMerged));
         json.addProperty("trackedPairsHidden", Math.max(0, trackedPairsHidden));
         json.addProperty("trackingTransitionsPerSec", Math.max(0, trackingTransitionsPerSec));
+        json.addProperty("redstoneChunksThrottled", Math.max(0, redstoneChunksThrottled));
+        json.addProperty("redstoneOpsBlocked", Math.max(0L, redstoneOpsBlocked));
 
         pendingTelemetry.set(json.toString());
     }

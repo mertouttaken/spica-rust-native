@@ -40,6 +40,12 @@ public final class RustNative {
     public static final int TRACK_ACTION_HIDE = 0;
     public static final int TRACK_ACTION_SHOW = 1;
 
+    // Redstone & Hopper Lag-Machine Governor action bitmask values
+    public static final int REDSTONE_ACTION_NORMAL = 0;
+    public static final int REDSTONE_ACTION_THROTTLE_REDSTONE = 1;
+    public static final int REDSTONE_ACTION_THROTTLE_HOPPERS = 2;
+    public static final int REDSTONE_ACTION_LOCKDOWN = 3;
+
     private RustNative() {
     }
 
@@ -296,5 +302,27 @@ public final class RustNative {
         ByteBuffer outDeltaMobIdx,
         ByteBuffer outDeltaAction,
         ByteBuffer outStats
+    );
+
+    /**
+     * Evaluates per-chunk Redstone & Hopper activity rates and thermal heat scores in zero-copy
+     * Rust, returning per-chunk {@code REDSTONE_ACTION_*} bitmasks, updated heat scores,
+     * fractional throttle ratios, and the indices of the hottest chunks into {@code outTopIndices}.
+     */
+    public static native int nativeEvaluateRedstoneChunks(
+        int chunkCount,
+        ByteBuffer chunkXs,
+        ByteBuffer chunkZs,
+        ByteBuffer redstonePerSec,
+        ByteBuffer hopperPerSec,
+        ByteBuffer prevHeat,
+        int redstoneLimit,
+        int hopperLimit,
+        int brainStateCode,
+        ByteBuffer outActions,
+        ByteBuffer outNewHeat,
+        ByteBuffer outThrottleRatio,
+        int maxTopChunks,
+        ByteBuffer outTopIndices
     );
 }

@@ -648,6 +648,83 @@ public final class SpicaRustAPI {
         );
     }
 
+    /**
+     * Evaluates per-chunk Redstone & Hopper activity rates and thermal heat scores in zero-copy
+     * Rust, returning the number of top hottest chunk indices written to {@code outTopIndices}.
+     *
+     * All ByteBuffers MUST be non-null direct ByteBuffers in native byte order.
+     */
+    public int evaluateRedstoneChunks(
+        int chunkCount,
+        ByteBuffer chunkXs,
+        ByteBuffer chunkZs,
+        ByteBuffer redstonePerSec,
+        ByteBuffer hopperPerSec,
+        ByteBuffer prevHeat,
+        int redstoneLimit,
+        int hopperLimit,
+        int brainStateCode,
+        ByteBuffer outActions,
+        ByteBuffer outNewHeat,
+        ByteBuffer outThrottleRatio,
+        int maxTopChunks,
+        ByteBuffer outTopIndices
+    ) {
+        ensureLoaded();
+        if (chunkCount <= 0) {
+            return 0;
+        }
+
+        requireDirectBuffer(chunkXs, "chunkXs");
+        requireDirectBuffer(chunkZs, "chunkZs");
+        requireDirectBuffer(redstonePerSec, "redstonePerSec");
+        requireDirectBuffer(hopperPerSec, "hopperPerSec");
+        requireDirectBuffer(prevHeat, "prevHeat");
+        requireDirectBuffer(outActions, "outActions");
+        requireDirectBuffer(outNewHeat, "outNewHeat");
+        requireDirectBuffer(outThrottleRatio, "outThrottleRatio");
+        requireDirectBuffer(outTopIndices, "outTopIndices");
+
+        long chunkBytes = (long) chunkCount * Integer.BYTES;
+        if (chunkXs.capacity() < chunkBytes
+            || chunkZs.capacity() < chunkBytes
+            || redstonePerSec.capacity() < chunkBytes
+            || hopperPerSec.capacity() < chunkBytes
+            || prevHeat.capacity() < chunkBytes
+            || outActions.capacity() < chunkBytes
+            || outNewHeat.capacity() < chunkBytes
+            || outThrottleRatio.capacity() < chunkBytes) {
+            throw new IllegalArgumentException("Redstone chunk ByteBuffers are smaller than chunkCount * 4 bytes.");
+        }
+
+        int safeMaxTop = Math.max(0, maxTopChunks);
+        long topBytes = (long) safeMaxTop * Integer.BYTES;
+        if (outTopIndices.capacity() < topBytes) {
+            throw new IllegalArgumentException("outTopIndices ByteBuffer is smaller than maxTopChunks * 4 bytes.");
+        }
+
+        int safeRedstoneLimit = Math.max(1, redstoneLimit);
+        int safeHopperLimit = Math.max(1, hopperLimit);
+        int safeState = Math.clamp(brainStateCode, BrainDirective.STATE_GREEN, BrainDirective.STATE_EMERGENCY);
+
+        return RustNative.nativeEvaluateRedstoneChunks(
+            chunkCount,
+            chunkXs,
+            chunkZs,
+            redstonePerSec,
+            hopperPerSec,
+            prevHeat,
+            safeRedstoneLimit,
+            safeHopperLimit,
+            safeState,
+            outActions,
+            outNewHeat,
+            outThrottleRatio,
+            safeMaxTop,
+            outTopIndices
+        );
+    }
+
     private static void requireDirectBuffer(ByteBuffer buf, String name) {
         if (buf == null || !buf.isDirect()) {
             throw new IllegalArgumentException(name + " must be a non-null direct ByteBuffer.");

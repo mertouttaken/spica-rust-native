@@ -11,7 +11,10 @@ use jni::objects::{JByteBuffer, JClass};
 use jni::sys::{jfloat, jint, jlong, jstring};
 use jni::JNIEnv;
 
-use crate::{farm_governor, flowfield, governor, heatmap, kernels, mob_tracker, noise, surge_guard};
+use crate::{
+    farm_governor, flowfield, governor, heatmap, kernels, mob_tracker, noise, redstone_guard,
+    surge_guard,
+};
 
 /// Safely view a Java DirectByteBuffer as an immutable slice `&[T]`.
 unsafe fn buf_as_slice<'a, T>(
@@ -866,6 +869,96 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
                 out_delta_mob_idx,
                 out_delta_action,
                 out_stats,
+            )
+        })
+    }))
+    .unwrap_or(-1)
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments, unused_mut)]
+pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_nativeEvaluateRedstoneChunks<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    chunk_count: jint,
+    chunk_xs_buf: JByteBuffer<'local>,
+    chunk_zs_buf: JByteBuffer<'local>,
+    redstone_per_sec_buf: JByteBuffer<'local>,
+    hopper_per_sec_buf: JByteBuffer<'local>,
+    prev_heat_buf: JByteBuffer<'local>,
+    redstone_limit: jint,
+    hopper_limit: jint,
+    brain_state_code: jint,
+    out_actions_buf: JByteBuffer<'local>,
+    out_new_heat_buf: JByteBuffer<'local>,
+    out_throttle_ratio_buf: JByteBuffer<'local>,
+    max_top_chunks: jint,
+    out_top_indices_buf: JByteBuffer<'local>,
+) -> jint {
+    if chunk_count <= 0 {
+        if max_top_chunks > 0 {
+            let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+                if !out_top_indices_buf.is_null() {
+                    if let Ok(out_top) = buf_as_mut_slice::<i32>(
+                        &mut env,
+                        &out_top_indices_buf,
+                        max_top_chunks as usize,
+                    ) {
+                        out_top.fill(-1);
+                    }
+                }
+            }));
+        }
+        return 0;
+    }
+
+    let n = chunk_count as usize;
+    let top_k = max_top_chunks.max(0) as usize;
+
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Ok(chunk_xs) = buf_as_slice::<i32>(&mut env, &chunk_xs_buf, n) else { return -1; };
+        let Ok(chunk_zs) = buf_as_slice::<i32>(&mut env, &chunk_zs_buf, n) else { return -1; };
+        let Ok(redstone_per_sec) = buf_as_slice::<i32>(&mut env, &redstone_per_sec_buf, n) else {
+            return -1;
+        };
+        let Ok(hopper_per_sec) = buf_as_slice::<i32>(&mut env, &hopper_per_sec_buf, n) else {
+            return -1;
+        };
+        let Ok(prev_heat) = buf_as_slice::<f32>(&mut env, &prev_heat_buf, n) else { return -1; };
+        let Ok(out_actions) = buf_as_mut_slice::<i32>(&mut env, &out_actions_buf, n) else {
+            return -1;
+        };
+        let Ok(out_new_heat) = buf_as_mut_slice::<f32>(&mut env, &out_new_heat_buf, n) else {
+            return -1;
+        };
+        let Ok(out_throttle_ratio) =
+            buf_as_mut_slice::<f32>(&mut env, &out_throttle_ratio_buf, n)
+        else {
+            return -1;
+        };
+        let out_top_indices: &mut [i32] = if top_k == 0 {
+            &mut []
+        } else {
+            let Ok(top) = buf_as_mut_slice::<i32>(&mut env, &out_top_indices_buf, top_k) else {
+                return -1;
+            };
+            top
+        };
+
+        crate::run_in_pool(|| {
+            redstone_guard::evaluate_redstone_chunks(
+                chunk_xs,
+                chunk_zs,
+                redstone_per_sec,
+                hopper_per_sec,
+                prev_heat,
+                redstone_limit,
+                hopper_limit,
+                brain_state_code,
+                out_actions,
+                out_new_heat,
+                out_throttle_ratio,
+                out_top_indices,
             )
         })
     }))

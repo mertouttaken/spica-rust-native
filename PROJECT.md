@@ -95,4 +95,5 @@ spica-rust-native/
 - [x] v2.3.0 Elytra / Chunk-Load Baskı Koruması & Patlama Eşya Tamponu (`SurgeExplosionGuard`, `/rustbridge surge`, `spica_elytra_clamps_total`, `spica_explosion_items_merged_total`)
 - [x] v2.3.0 Yeni Rust Çekirdekleri: 2D Flow-Field Toplu Pathfinding (`flowfield.rs`) + Paralel 4-Oktav FBM WorldGen Noise (`noise.rs`, `/rustbridge kernels`)
 - [x] v2.4.0 Rust Mob Tracking & Görünürlük Optimizasyon Motoru (`mob_tracker.rs` + `MobTrackingOptimizer.java` — 200.000 `(oyuncu, mob)` çifti `1.117 ms`, dikey mağara culling, arka FOV culling, oyuncu başı Top-K öncelik bütçesi, sıfır-titreme histerezis delta + `Player#hideEntity`/`showEntity`, `/rustbridge tracking`)
+- [x] v2.5.0 Redstone & Hopper Lag Makinesi Frenleyici (`redstone_guard.rs` + `RedstoneHopperGovernor.java` — 2.000 chunk `0.061 ms`, asimetrik EWMA ısı modeli, oyuncu buton/şalter koruması, `/rustbridge redstone` + Prometheus metrikleri)
 - [ ] Özel şematik toplu blok hesaplayıcı ve Rust tabanlı anti-bot/paket ön filtresi

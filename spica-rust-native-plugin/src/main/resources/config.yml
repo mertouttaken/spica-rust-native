@@ -1,4 +1,4 @@
-# SpicaRustNative 2.4.0 (Purpur 1.21.4 Core + Rust Brain + Farm Governor + Surge Guard + Mob Tracking Optimizer) Yapilandirmasi
+# SpicaRustNative 2.5.0 (Purpur 1.21.4 Core + Rust Brain + Farm Governor + Surge Guard + Mob Tracking + Redstone/Hopper Governor) Yapilandirmasi
 native:
   # 0 = Otomatik (max(2, cekirdek/2), en fazla 8). Main thread + Netty + GC icin bosluk birakir.
   worker-threads: 0
@@ -144,3 +144,15 @@ mob-tracking:
     - ELDER_GUARDIAN
     - VILLAGER
     - IRON_GOLEM
+
+redstone-governor:
+  # Rust destekli canli Redstone & Hopper Lag-Machine Governor motorunu aktif eder.
+  enabled: true
+  # Chunk basina saniyelik temel Redstone guncelleme limiti (Brain yuk durumunda otomatik daraltilir).
+  redstone-limit-per-sec: 320
+  # Chunk basina saniyelik temel Hopper/Envanter esya transfer limiti (Brain yuk durumunda otomatik daraltilir).
+  hopper-limit-per-sec: 240
+  # Oyuncu tetikleyicilerini (dugme, salter, basinc plakasi, tuzak kancasi) asla kisitlama.
+  protect-player-triggers: true
+  # Bir chunk LOCKDOWN seviyesine gectiginde konsola uyari yaz (chunk basina 30 saniyede en fazla 1 kez).
+  alert-admins-on-lockdown: true
