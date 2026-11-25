@@ -3,7 +3,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
 
-use crate::{farm_governor, governor, kernels};
+use crate::{farm_governor, governor, kernels, noise};
 
 /// Initialize the Rayon worker thread pool. Pass `0` to auto-select optimal thread count.
 /// Returns active thread count, or `-1` on error.
@@ -308,6 +308,59 @@ pub unsafe extern "C" fn spica_evaluate_farm_throttling(
                 brain_state_code,
                 oa,
                 on,
+            )
+        })
+    }))
+    .unwrap_or(-1)
+}
+
+/// Generate deterministic parallel 2D FBM gradient noise via raw C pointers (zero-copy).
+///
+/// Returns the number of generated samples (`width * depth`), or `-1` on error.
+///
+/// # Safety
+/// `out_heights` must be non-null, properly aligned for `f32`, and writable for at least
+/// `width * depth` elements.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn spica_generate_noise_2d(
+    origin_x: f32,
+    origin_z: f32,
+    width: usize,
+    depth: usize,
+    step: f32,
+    seed: i32,
+    octaves: i32,
+    frequency: f32,
+    lacunarity: f32,
+    persistence: f32,
+    out_heights: *mut f32,
+) -> i32 {
+    if width == 0 || depth == 0 {
+        return 0;
+    }
+    let Some(total) = width.checked_mul(depth) else {
+        return -1;
+    };
+    if out_heights.is_null() || (out_heights as usize) % std::mem::align_of::<f32>() != 0 {
+        return -1;
+    }
+
+    catch_unwind(AssertUnwindSafe(|| {
+        let out = slice::from_raw_parts_mut(out_heights, total);
+        crate::run_in_pool(|| {
+            noise::generate_noise_2d(
+                origin_x,
+                origin_z,
+                width,
+                depth,
+                step,
+                seed,
+                octaves,
+                frequency,
+                lacunarity,
+                persistence,
+                out,
             )
         })
     }))

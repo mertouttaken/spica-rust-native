@@ -1,4 +1,4 @@
-# Production Linux x86_64 build (spica-launcher + libspica_rust_native.so + SpicaRustNative-2.2.0.jar)
+# Production Linux x86_64 build (spica-launcher + libspica_rust_native.so + SpicaRustNative-2.3.0.jar)
 # Kullanim:
 #   docker build -f Dockerfile.linux --output type=local,dest=./dist/linux-x86_64 .
 
@@ -19,6 +19,6 @@ COPY --from=rust-builder /build/target/release/libspica_rust_native.so \
 RUN mvn -B clean package
 
 FROM scratch AS export
-COPY --from=java-builder /build/plugin/target/SpicaRustNative-2.2.0.jar /SpicaRustNative-2.2.0.jar
+COPY --from=java-builder /build/plugin/target/SpicaRustNative-2.3.0.jar /SpicaRustNative-2.3.0.jar
 COPY --from=rust-builder /build/target/release/spica-launcher /spica-launcher
 COPY --from=rust-builder /build/target/release/libspica_rust_native.so /libspica_rust_native.so

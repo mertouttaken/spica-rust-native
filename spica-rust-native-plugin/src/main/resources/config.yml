@@ -1,4 +1,4 @@
-# SpicaRustNative 2.1.0 (Purpur 1.21.4 Core + Rust Brain + Farm & Villager Governor) Yapilandirmasi
+# SpicaRustNative 2.3.0 (Purpur 1.21.4 Core + Rust Brain + Farm Governor + Surge/Explosion Guard) Yapilandirmasi
 native:
   # 0 = Otomatik (max(2, cekirdek/2), en fazla 8). Main thread + Netty + GC icin bosluk birakir.
   worker-threads: 0
@@ -89,3 +89,25 @@ farm-governor:
     - WITHER
     - WARDEN
     - ELDER_GUARDIAN
+
+surge-guard:
+  # Rust destekli Elytra / Chunk-Yukleme Surge Guard ve Patlama Esya Tamponunu aktif eder.
+  enabled: true
+  elytra:
+    # Yuksek sunucu yukunde veya chunk-yukleme patlamasinda Elytra hizini yumusak sekilde dengeler.
+    enabled: true
+    # Kac tick'te bir suzulen oyuncularin hizi Rust ile degerlendirilsin (10 tick = 0.5 saniye).
+    interval-ticks: 10
+    # GREEN durumunda izin verilen temel maksimum Elytra hizi (blok/tick).
+    base-max-speed: 1.8
+    # Saniyede bu agirlikta chunk yuklenirse (yeni chunk = 2, mevcut chunk = 1) efektif Brain durumu +1 yukseltilir.
+    chunk-load-surge-threshold: 40
+    # Hiz dengelendiginde oyuncuya (3 saniye bekleme suresiyle) kibar ActionBar bildirimi goster.
+    actionbar-warning: true
+  explosion:
+    # TNT / Creeper / yatak patlamalarindan 1 tick sonra yerdeki esyalari Rust ile NBT-guvenli birlestirir.
+    enabled: true
+    # Bu sayida veya daha fazla blok kirilan patlamalarda tamponu tetikle.
+    min-blocks-trigger: 8
+    # Patlama sonrasi esya birlestirme yaricapi (blok).
+    merge-radius: 5.0

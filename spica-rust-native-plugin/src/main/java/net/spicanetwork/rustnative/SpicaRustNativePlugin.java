@@ -9,6 +9,7 @@ import net.spicanetwork.rustnative.nativebridge.NativeLoader;
 import net.spicanetwork.rustnative.nativebridge.RustNative;
 import net.spicanetwork.rustnative.optimizer.EntityLodOptimizer;
 import net.spicanetwork.rustnative.optimizer.FarmVillagerGovernor;
+import net.spicanetwork.rustnative.optimizer.SurgeExplosionGuard;
 import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.ServicePriority;
@@ -16,17 +17,19 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
 /**
- * Main entry point for SpicaRustNative v2.1.0 (Purpur 1.21.4 Execution Core + Rust Brain + Farm Governor).
+ * Main entry point for SpicaRustNative v2.3.0 (Purpur 1.21.4 Execution Core + Rust Brain + Farm/Surge Guards).
  */
 public final class SpicaRustNativePlugin extends JavaPlugin {
 
     private SpicaRustAPI api;
     private EntityLodOptimizer optimizer;
     private FarmVillagerGovernor farmGovernor;
+    private SurgeExplosionGuard surgeGuard;
     private BrainIpcClient brainIpcClient;
     private BrainActuator brainActuator;
     private BukkitTask optimizerTask;
     private BukkitTask farmGovernorTask;
+    private BukkitTask surgeGuardTask;
     private BukkitTask brainTask;
 
     @Override
@@ -58,8 +61,12 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
         this.farmGovernor.setExternalAiManagedPredicate(optimizer::isHibernatedByUs);
         Bukkit.getPluginManager().registerEvents(farmGovernor, this);
 
+        this.surgeGuard = new SurgeExplosionGuard(this, api);
+        this.surgeGuard.reloadConfig(getConfig());
+        Bukkit.getPluginManager().registerEvents(surgeGuard, this);
+
         this.brainIpcClient = createAndStartIpcClient();
-        this.brainActuator = new BrainActuator(api, optimizer, farmGovernor, brainIpcClient, getLogger());
+        this.brainActuator = new BrainActuator(api, optimizer, farmGovernor, surgeGuard, brainIpcClient, getLogger());
         this.brainActuator.reloadConfig(getConfig());
 
         Bukkit.getServicesManager().register(SpicaRustAPI.class, api, this, ServicePriority.Normal);
@@ -73,6 +80,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
 
         scheduleOptimizer();
         scheduleFarmGovernor();
+        scheduleSurgeGuard();
         scheduleBrain();
     }
 
@@ -81,6 +89,10 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
         if (brainTask != null) {
             brainTask.cancel();
             brainTask = null;
+        }
+        if (surgeGuardTask != null) {
+            surgeGuardTask.cancel();
+            surgeGuardTask = null;
         }
         if (farmGovernorTask != null) {
             farmGovernorTask.cancel();
@@ -96,6 +108,9 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
         }
         if (brainActuator != null) {
             brainActuator.restoreDefaults();
+        }
+        if (surgeGuard != null) {
+            surgeGuard.resetPending();
         }
         if (farmGovernor != null) {
             int restoredFarm = farmGovernor.restoreAll();
@@ -122,6 +137,10 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
             brainTask.cancel();
             brainTask = null;
         }
+        if (surgeGuardTask != null) {
+            surgeGuardTask.cancel();
+            surgeGuardTask = null;
+        }
         if (farmGovernorTask != null) {
             farmGovernorTask.cancel();
             farmGovernorTask = null;
@@ -132,6 +151,10 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
         }
         if (brainActuator != null) {
             brainActuator.restoreDefaults();
+        }
+        if (surgeGuard != null) {
+            surgeGuard.resetPending();
+            surgeGuard.reloadConfig(getConfig());
         }
         if (farmGovernor != null) {
             farmGovernor.restoreAll();
@@ -151,6 +174,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
 
         scheduleOptimizer();
         scheduleFarmGovernor();
+        scheduleSurgeGuard();
         scheduleBrain();
     }
 
@@ -198,6 +222,28 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
         );
     }
 
+    private void scheduleSurgeGuard() {
+        if (surgeGuardTask != null) {
+            surgeGuardTask.cancel();
+            surgeGuardTask = null;
+        }
+        if (!getConfig().getBoolean("surge-guard.enabled", true)) {
+            return;
+        }
+        long interval = Math.max(1L, getConfig().getLong("surge-guard.elytra.interval-ticks", 10L));
+        this.surgeGuardTask = Bukkit.getScheduler().runTaskTimer(
+            this,
+            () -> {
+                int stateCode = brainActuator != null
+                    ? brainActuator.getCurrentBrainStateCode()
+                    : BrainDirective.STATE_GREEN;
+                surgeGuard.tick(stateCode);
+            },
+            interval,
+            interval
+        );
+    }
+
     private void scheduleBrain() {
         if (brainTask != null) {
             brainTask.cancel();
@@ -220,6 +266,10 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
 
     public FarmVillagerGovernor getFarmGovernor() {
         return farmGovernor;
+    }
+
+    public SurgeExplosionGuard getSurgeGuard() {
+        return surgeGuard;
     }
 
     public BrainActuator getBrainActuator() {

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SpicaRustNative v2.2.0 — Live Telemetry Dashboard</title>
+  <title>SpicaRustNative v2.3.0 — Live Telemetry Dashboard</title>
   <style>
     :root {
       --bg: #0b0f17;
@@ -442,6 +442,39 @@
       font-variant-numeric: tabular-nums;
     }
 
+    .sub-badge-row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .sub-badge {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      background: rgba(11, 15, 23, 0.52);
+      border: 1px solid var(--border-soft);
+      border-radius: 7px;
+      padding: 5px 9px;
+    }
+
+    .sub-badge-key {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .sub-badge-val {
+      font-family: var(--mono);
+      font-size: 12.5px;
+      font-weight: 700;
+      color: #f1f5f9;
+      font-variant-numeric: tabular-nums;
+    }
+
     /* Chart Panel */
     .chart-card {
       background: var(--card);
@@ -595,7 +628,7 @@
         <div>
           <div class="brand-title">
             SpicaRustNative
-            <span class="version-pill">v2.2.0</span>
+            <span class="version-pill">v2.3.0</span>
           </div>
           <div class="brand-sub" id="serverMeta">Purpur 1.21.4 Core + Rust Brain</div>
         </div>
@@ -739,6 +772,16 @@
             <span class="mini-val" id="kpiVillagersThrottled" style="color:#818cf8;">0</span>
           </div>
         </div>
+        <div class="sub-badge-row">
+          <div class="sub-badge">
+            <span class="sub-badge-key">Elytra Clamps</span>
+            <span class="sub-badge-val" id="kpiElytraClamps" style="color:#22d3ee;">0</span>
+          </div>
+          <div class="sub-badge">
+            <span class="sub-badge-key">Explosion Merged</span>
+            <span class="sub-badge-val" id="kpiExplosionMerged" style="color:#f97316;">0</span>
+          </div>
+        </div>
       </article>
 
       <!-- 5. JVM Heap -->
@@ -868,6 +911,8 @@
         kpiHibernated: $("kpiHibernated"),
         kpiFarmThrottled: $("kpiFarmThrottled"),
         kpiVillagersThrottled: $("kpiVillagersThrottled"),
+        kpiElytraClamps: $("kpiElytraClamps"),
+        kpiExplosionMerged: $("kpiExplosionMerged"),
         governorSavedTag: $("governorSavedTag"),
         kpiHeapUsed: $("kpiHeapUsed"),
         kpiHeapMax: $("kpiHeapMax"),
@@ -1027,10 +1072,14 @@
         const hibernated = Math.round(num(snap.hibernated, 0));
         const farmThrottled = Math.round(num(snap.farmThrottled, 0));
         const villagers = Math.round(num(snap.villagersThrottled, 0));
+        const elytraClamps = Math.round(num(snap.elytraClamps, 0));
+        const explosionMerged = Math.round(num(snap.explosionItemsMerged, 0));
         const totalGov = hibernated + farmThrottled + villagers;
         els.kpiHibernated.textContent = hibernated.toLocaleString();
         els.kpiFarmThrottled.textContent = farmThrottled.toLocaleString();
         els.kpiVillagersThrottled.textContent = villagers.toLocaleString();
+        els.kpiElytraClamps.textContent = elytraClamps.toLocaleString();
+        els.kpiExplosionMerged.textContent = explosionMerged.toLocaleString();
         els.governorSavedTag.textContent = totalGov.toLocaleString() + " governed";
 
         // 5. JVM Heap

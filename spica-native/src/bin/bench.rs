@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use spica_rust_native::{
-    farm_governor, governor, heatmap, init_thread_pool, kernels, run_in_pool,
+    farm_governor, flowfield, governor, heatmap, init_thread_pool, kernels, noise, run_in_pool,
 };
 
 fn lcg_next(state: &mut u64) -> f32 {
@@ -283,10 +283,81 @@ fn main() {
         dt_farm, throttled_count, entities
     );
 
+    // 8) Flow-Field 128x128
+    let ff_w = 128usize;
+    let ff_d = 128usize;
+    let ff_len = ff_w * ff_d;
+    let mut cost_grid = vec![1u8; ff_len];
+    for z in 16..112 {
+        if z % 16 != 0 {
+            cost_grid[z * ff_w + 42] = 0;
+            cost_grid[z * ff_w + 86] = 0;
+        }
+    }
+    let mut ff_dist = vec![0.0f32; ff_len];
+    let mut ff_dir_x = vec![0.0f32; ff_len];
+    let mut ff_dir_z = vec![0.0f32; ff_len];
+
+    let t7 = Instant::now();
+    let mut ff_reachable = 0i32;
+    for _ in 0..iterations {
+        ff_reachable = run_in_pool(|| {
+            flowfield::compute_flow_field(
+                ff_w,
+                ff_d,
+                &cost_grid,
+                64,
+                64,
+                &mut ff_dist,
+                &mut ff_dir_x,
+                &mut ff_dir_z,
+            )
+        });
+    }
+    let dt_flow = t7.elapsed().as_secs_f64() * 1000.0 / (iterations as f64);
+    println!(
+        "[8] Flow-Field 128x128      : {:.3} ms/eval (reachable: {}/{})",
+        dt_flow, ff_reachable, ff_len
+    );
+
+    // 9) Parallel FBM Noise 256x256
+    let noise_w = 256usize;
+    let noise_d = 256usize;
+    let mut noise_out = vec![0.0f32; noise_w * noise_d];
+
+    let t8 = Instant::now();
+    let mut noise_samples = 0i32;
+    for i in 0..iterations {
+        noise_samples = run_in_pool(|| {
+            noise::generate_noise_2d(
+                (i as f32) * 16.0,
+                0.0,
+                noise_w,
+                noise_d,
+                1.0,
+                2026,
+                5,
+                0.015,
+                2.0,
+                0.5,
+                &mut noise_out,
+            )
+        });
+    }
+    let dt_noise = t8.elapsed().as_secs_f64() * 1000.0 / (iterations as f64);
+    println!(
+        "[9] Parallel FBM Noise 256x256: {:.3} ms/eval (samples: {})",
+        dt_noise, noise_samples
+    );
+
     let total_ms = dt_coll + dt_ai + dt_boids + dt_heatmap + dt_merge + dt_gov_ms + dt_farm;
     println!(
-        "\nTotal combined budget: {:.3} ms / 50.000 ms tick ({:.2}% of 1 tick)",
+        "\nTotal per-tick budget [1..7]: {:.3} ms / 50.000 ms tick ({:.2}% of 1 tick)",
         total_ms,
         total_ms / 50.0 * 100.0
+    );
+    println!(
+        "Async/On-demand kernels [8..9]: Flow-Field={:.3} ms | FBM-Noise={:.3} ms",
+        dt_flow, dt_noise
     );
 }

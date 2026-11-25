@@ -92,6 +92,6 @@ spica-rust-native/
 - [x] v2.1.0 Canlı Mob-Farm & Köylü (Villager) Frenleme Motoru (otomatik çarpışma/AI kısma, oyuncu etkileşiminde anlık uyanma, periyodik restock nabzı, `/rustbridge farms` + Prometheus metrikleri)
 - [x] v2.2.0 Gömülü Canlı Web Dashboard (`http://127.0.0.1:9120/` + 120s MSPT/EWMA/TPS grafik ring-buffer, sıfır CDN, 0 JVM yükü)
 - [x] v2.2.0 GitHub Actions CI/CD (`.github/workflows/ci-release.yml` — Windows x64 + Linux x64 + Linux ARM64 tek **Universal JAR** + otomatik GitHub Release)
-- [ ] Oto Purpur 1.21.4 indirici + Discord Webhook crash/lag alarmları (`spica-launcher`)
-- [ ] Web panel / Grafana hazır Prometheus dashboard şablonu
-- [ ] Özel chunk/şematik toplu blok hesaplayıcı ve Rust tabanlı anti-bot/paket ön filtresi
+- [x] v2.3.0 Elytra / Chunk-Load Baskı Koruması & Patlama Eşya Tamponu (`SurgeExplosionGuard`, `/rustbridge surge`, `spica_elytra_clamps_total`, `spica_explosion_items_merged_total`)
+- [x] v2.3.0 Yeni Rust Çekirdekleri: 2D Flow-Field Toplu Pathfinding (`flowfield.rs`) + Paralel 4-Oktav FBM WorldGen Noise (`noise.rs`, `/rustbridge kernels`)
+- [ ] Özel şematik toplu blok hesaplayıcı ve Rust tabanlı anti-bot/paket ön filtresi

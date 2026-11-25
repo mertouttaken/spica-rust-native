@@ -3,6 +3,10 @@ package net.spicanetwork.rustnative.benchmark;
 import net.spicanetwork.rustnative.api.SpicaRustAPI;
 import net.spicanetwork.rustnative.nativebridge.EntityBatchArena;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
 import java.util.SplittableRandom;
 
 /**
@@ -34,6 +38,150 @@ public final class BridgeBenchmark {
         public double aiSpeedup() {
             return rustAiMs > 0 ? javaAiMs / rustAiMs : 0.0;
         }
+    }
+
+    public record KernelBenchmarkReport(
+        int flowWidth,
+        int flowDepth,
+        int flowIterations,
+        double flowFieldMs,
+        int flowReachableCells,
+        float sampleDirX,
+        float sampleDirZ,
+        int noiseWidth,
+        int noiseDepth,
+        int noiseOctaves,
+        int noiseIterations,
+        double noiseMs,
+        int noiseSamples,
+        float noiseMinHeight,
+        float noiseMaxHeight
+    ) {
+    }
+
+    /**
+     * Benchmarks the v2.3.0 Rust native kernels asynchronously:
+     * 1. 128x128 Dijkstra Flow-Field Pathfinding with an obstacle wall
+     * 2. 256x256 4-octave FBM WorldGen Noise (65,536 blocks)
+     */
+    public static KernelBenchmarkReport runKernelsBenchmark(SpicaRustAPI api) {
+        final int flowW = 128;
+        final int flowD = 128;
+        final int flowCells = flowW * flowD;
+        final int goalX = 96;
+        final int goalZ = 64;
+        final int flowIters = 20;
+
+        ByteBuffer outDist = ByteBuffer.allocateDirect(flowCells * Float.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer outDirX = ByteBuffer.allocateDirect(flowCells * Float.BYTES).order(ByteOrder.nativeOrder());
+        ByteBuffer outDirZ = ByteBuffer.allocateDirect(flowCells * Float.BYTES).order(ByteOrder.nativeOrder());
+
+        // Prepare u8 cost grid (1 = walkable, 255 = obstacle wall at x=64, z=16..111)
+        ByteBuffer costGrid = ByteBuffer.allocateDirect(flowCells).order(ByteOrder.nativeOrder());
+        for (int z = 0; z < flowD; z++) {
+            for (int x = 0; x < flowW; x++) {
+                boolean isWall = (x == 64 && z >= 16 && z < 112);
+                costGrid.put(z * flowW + x, isWall ? (byte) 255 : (byte) 1);
+            }
+        }
+
+        // Probe costGrid format cleanly (u8 default, fallback to i32 / f32 if kernel requires 4-byte cells)
+        int probe = api.computeFlowField(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ);
+        if (probe < 0) {
+            ByteBuffer costGridInt = ByteBuffer.allocateDirect(flowCells * Integer.BYTES).order(ByteOrder.nativeOrder());
+            IntBuffer costIntView = costGridInt.asIntBuffer();
+            for (int z = 0; z < flowD; z++) {
+                for (int x = 0; x < flowW; x++) {
+                    boolean isWall = (x == 64 && z >= 16 && z < 112);
+                    costIntView.put(z * flowW + x, isWall ? 0 : 1);
+                }
+            }
+            int intProbe = api.computeFlowField(flowW, flowD, costGridInt, goalX, goalZ, outDist, outDirX, outDirZ);
+            if (intProbe >= 0) {
+                costGrid = costGridInt;
+                probe = intProbe;
+            } else {
+                ByteBuffer costGridFloat = ByteBuffer.allocateDirect(flowCells * Float.BYTES).order(ByteOrder.nativeOrder());
+                FloatBuffer costFloatView = costGridFloat.asFloatBuffer();
+                for (int z = 0; z < flowD; z++) {
+                    for (int x = 0; x < flowW; x++) {
+                        boolean isWall = (x == 64 && z >= 16 && z < 112);
+                        costFloatView.put(z * flowW + x, isWall ? 0.0f : 1.0f);
+                    }
+                }
+                costGrid = costGridFloat;
+                probe = api.computeFlowField(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ);
+            }
+        }
+
+        // Warmup Flow-Field
+        for (int w = 0; w < 3; w++) {
+            api.computeFlowField(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ);
+        }
+
+        int reachable = probe;
+        long tFlowStart = System.nanoTime();
+        for (int k = 0; k < flowIters; k++) {
+            reachable = api.computeFlowField(flowW, flowD, costGrid, goalX, goalZ, outDist, outDirX, outDirZ);
+        }
+        double flowFieldMs = (System.nanoTime() - tFlowStart) / 1_000_000.0 / flowIters;
+
+        int sampleIdx = 64 * flowW + 32;
+        float sampleDirX = outDirX.asFloatBuffer().get(sampleIdx);
+        float sampleDirZ = outDirZ.asFloatBuffer().get(sampleIdx);
+
+        // 2) 256x256 4-octave FBM WorldGen Noise (65,536 blocks)
+        final int noiseW = 256;
+        final int noiseD = 256;
+        final int noiseCells = noiseW * noiseD;
+        final int noiseOctaves = 4;
+        final int noiseIters = 20;
+
+        ByteBuffer outHeights = ByteBuffer.allocateDirect(noiseCells * Float.BYTES).order(ByteOrder.nativeOrder());
+
+        for (int w = 0; w < 3; w++) {
+            api.generateNoise2D(0.0f, 0.0f, noiseW, noiseD, 1.0f, 0x51CA2026, noiseOctaves, 0.008f, 2.0f, 0.5f, outHeights);
+        }
+
+        int noiseSamples = 0;
+        long tNoiseStart = System.nanoTime();
+        for (int k = 0; k < noiseIters; k++) {
+            noiseSamples = api.generateNoise2D(
+                0.0f, 0.0f, noiseW, noiseD, 1.0f, 0x51CA2026, noiseOctaves, 0.008f, 2.0f, 0.5f, outHeights
+            );
+        }
+        double noiseMs = (System.nanoTime() - tNoiseStart) / 1_000_000.0 / noiseIters;
+
+        FloatBuffer heightView = outHeights.asFloatBuffer();
+        float minH = Float.POSITIVE_INFINITY;
+        float maxH = Float.NEGATIVE_INFINITY;
+        for (int i = 0; i < noiseCells; i++) {
+            float h = heightView.get(i);
+            if (Float.isFinite(h)) {
+                if (h < minH) minH = h;
+                if (h > maxH) maxH = h;
+            }
+        }
+        if (!Float.isFinite(minH)) minH = 0.0f;
+        if (!Float.isFinite(maxH)) maxH = 0.0f;
+
+        return new KernelBenchmarkReport(
+            flowW,
+            flowD,
+            flowIters,
+            flowFieldMs,
+            reachable,
+            sampleDirX,
+            sampleDirZ,
+            noiseW,
+            noiseD,
+            noiseOctaves,
+            noiseIters,
+            noiseMs,
+            noiseSamples,
+            minH,
+            maxH
+        );
     }
 
     public static BenchmarkReport run(SpicaRustAPI api, int entities, int players, int iterations) {

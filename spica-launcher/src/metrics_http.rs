@@ -248,7 +248,13 @@ pub fn render_prometheus_metrics(s: &BrainSnapshot) -> String {
          spica_ipc_connected {}\n\
          # HELP spica_uptime_seconds Launcher daemon uptime in seconds.\n\
          # TYPE spica_uptime_seconds gauge\n\
-         spica_uptime_seconds {}\n",
+         spica_uptime_seconds {}\n\
+         # HELP spica_elytra_clamps_total Cumulative Elytra speed clamps enforced by Surge Guard.\n\
+         # TYPE spica_elytra_clamps_total counter\n\
+         spica_elytra_clamps_total {}\n\
+         # HELP spica_explosion_items_merged_total Cumulative dropped items pre-merged by Explosion Guard.\n\
+         # TYPE spica_explosion_items_merged_total counter\n\
+         spica_explosion_items_merged_total {}\n",
         s.mspt,
         s.ewma_mspt,
         s.tps,
@@ -266,6 +272,8 @@ pub fn render_prometheus_metrics(s: &BrainSnapshot) -> String {
         s.host_ram_total_mb,
         connected_val,
         s.uptime_secs,
+        s.elytra_clamps,
+        s.explosion_items_merged,
     )
 }
 
@@ -286,6 +294,8 @@ mod tests {
             hibernated: 85,
             farm_throttled: 42,
             villagers_throttled: 18,
+            elytra_clamps: 7,
+            explosion_items_merged: 315,
             players: 12,
             loaded_chunks: 1200,
             heap_used_mb: 2048,
@@ -304,6 +314,10 @@ mod tests {
             "spica_brain_state ",
             "spica_host_cpu_percent ",
             "spica_heap_used_mb ",
+            "# TYPE spica_elytra_clamps_total counter",
+            "spica_elytra_clamps_total 7",
+            "# TYPE spica_explosion_items_merged_total counter",
+            "spica_explosion_items_merged_total 315",
         ] {
             assert!(text.contains(metric), "Missing metric: {}", metric);
         }
@@ -332,6 +346,8 @@ mod tests {
             hibernated: 60,
             farm_throttled: 12,
             villagers_throttled: 6,
+            elytra_clamps: 3,
+            explosion_items_merged: 95,
             players: 8,
             loaded_chunks: 900,
             heap_used_mb: 1800,
@@ -348,6 +364,8 @@ mod tests {
         assert!(parsed.get("history").is_some(), "Missing history key");
         assert_eq!(parsed["snapshot"]["entities"], 250);
         assert_eq!(parsed["snapshot"]["farmThrottled"], 12);
+        assert_eq!(parsed["snapshot"]["elytraClamps"], 3);
+        assert_eq!(parsed["snapshot"]["explosionItemsMerged"], 95);
         let hist_arr = parsed["history"]
             .as_array()
             .expect("history must be a JSON array");

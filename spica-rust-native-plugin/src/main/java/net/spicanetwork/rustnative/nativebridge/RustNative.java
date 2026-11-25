@@ -26,6 +26,11 @@ public final class RustNative {
     public static final int FLAG_TRAPPED_BOX = 4;
     public static final int FLAG_RECENT_INTERACT = 8;
 
+    // Elytra / Chunk-Load Surge Guard actions
+    public static final int SURGE_OK = 0;
+    public static final int SURGE_WARN = 1;
+    public static final int SURGE_CLAMP_VELOCITY = 2;
+
     private RustNative() {
     }
 
@@ -195,5 +200,59 @@ public final class RustNative {
         int brainStateCode,
         ByteBuffer outActions,
         ByteBuffer outNeighborCounts
+    );
+
+    /**
+     * Evaluates gliding players for Elytra / chunk-load velocity surges and outputs
+     * per-player {@code SURGE_*} actions and smoothly clamped velocity vectors.
+     */
+    public static native int nativeEvaluatePlayerSurges(
+        int playerCount,
+        ByteBuffer px,
+        ByteBuffer py,
+        ByteBuffer pz,
+        ByteBuffer vx,
+        ByteBuffer vy,
+        ByteBuffer vz,
+        ByteBuffer isGliding,
+        int brainStateCode,
+        float baseMaxElytraSpeed,
+        ByteBuffer outActions,
+        ByteBuffer outClampedVx,
+        ByteBuffer outClampedVy,
+        ByteBuffer outClampedVz
+    );
+
+    /**
+     * Computes a 2D Dijkstra integration distance field and normalized steering flow-field
+     * around obstacles toward {@code (goalX, goalZ)}.
+     */
+    public static native int nativeComputeFlowField(
+        int width,
+        int depth,
+        ByteBuffer costGrid,
+        int goalX,
+        int goalZ,
+        ByteBuffer outDist,
+        ByteBuffer outDirX,
+        ByteBuffer outDirZ
+    );
+
+    /**
+     * Generates a 2D multi-octave Fractal Brownian Motion (FBM) world-generation noise grid
+     * in parallel via Rust Rayon.
+     */
+    public static native int nativeGenerateNoise2D(
+        float originX,
+        float originZ,
+        int width,
+        int depth,
+        float step,
+        int seed,
+        int octaves,
+        float frequency,
+        float lacunarity,
+        float persistence,
+        ByteBuffer outHeights
     );
 }

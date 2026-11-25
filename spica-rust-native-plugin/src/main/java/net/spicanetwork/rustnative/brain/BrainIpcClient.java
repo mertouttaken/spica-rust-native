@@ -28,7 +28,7 @@ import java.util.logging.Logger;
  */
 public final class BrainIpcClient {
 
-    public static final String PLUGIN_VERSION = "2.2.0";
+    public static final String PLUGIN_VERSION = "2.3.0";
     public static final String SERVER_FLAVOR = "purpur-1.21.4";
 
     private static final int CONNECT_TIMEOUT_MS = 3_000;
@@ -129,6 +129,30 @@ public final class BrainIpcClient {
         int farmThrottled,
         int villagersThrottled
     ) {
+        submitTelemetry(
+            mspt, tps, entities, hibernated, players, loadedChunks, heapUsedMb, heapMaxMb,
+            farmThrottled, villagersThrottled, 0L, 0L
+        );
+    }
+
+    /**
+     * Non-blocking single-slot telemetry submission including Farm & Villager Governor and
+     * Elytra / Explosion Surge Guard metrics.
+     */
+    public void submitTelemetry(
+        double mspt,
+        double tps,
+        int entities,
+        int hibernated,
+        int players,
+        int loadedChunks,
+        long heapUsedMb,
+        long heapMaxMb,
+        int farmThrottled,
+        int villagersThrottled,
+        long elytraClamps,
+        long explosionItemsMerged
+    ) {
         if (!enabled || !running.get() || !connected.get()) {
             return;
         }
@@ -145,6 +169,8 @@ public final class BrainIpcClient {
         json.addProperty("heapMaxMb", Math.max(0L, heapMaxMb));
         json.addProperty("farmThrottled", Math.max(0, farmThrottled));
         json.addProperty("villagersThrottled", Math.max(0, villagersThrottled));
+        json.addProperty("elytraClamps", Math.max(0L, elytraClamps));
+        json.addProperty("explosionItemsMerged", Math.max(0L, explosionItemsMerged));
 
         pendingTelemetry.set(json.toString());
     }

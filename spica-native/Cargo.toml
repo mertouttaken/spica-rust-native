@@ -1,6 +1,6 @@
 [package]
 name = "spica-rust-native"
-version = "2.2.0"
+version = "2.3.0"
 edition = "2021"
 description = "High-performance Rust native engine (Spatial Hash + Rayon + Zero-Copy JNI/FFM) for Purpur/Paper 1.21.4"
 

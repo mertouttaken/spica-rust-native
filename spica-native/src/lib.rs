@@ -6,11 +6,14 @@
 
 pub mod c_abi;
 pub mod farm_governor;
+pub mod flowfield;
 pub mod governor;
 pub mod heatmap;
 pub mod jni_bridge;
 pub mod kernels;
+pub mod noise;
 pub mod spatial;
+pub mod surge_guard;
 
 use std::sync::OnceLock;
 

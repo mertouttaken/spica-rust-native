@@ -1,4 +1,4 @@
-# SpicaRustNative v2.2 — Purpur 1.21.4 Core + Rust Brain
+# SpicaRustNative v2.3 — Purpur 1.21.4 Core + Rust Brain
 
 > **Execution Core:** Purpur / Paper 1.21.4 (100% compatible with existing Bukkit/Paper/Purpur plugins)  
 > **Brain & Orchestrator:** Rust (`spica-launcher` + `spica-native`)
@@ -24,16 +24,16 @@
 ┌──────────────────────────────────▼─────────────────────────────────────┐
 │  2) SpicaRustNative Plugin (Purpur 1.21.4 Execution Body)              │
 │  • Safely actuates Rust Brain directives onto live worlds:             │
-│    dynamic AI LOD, live Mob-Farm & Villager Trading-Hall Governor,     │
-│    cooldown-guarded view/sim distance, NBT-safe item stack merging     │
+│    dynamic AI LOD, Mob-Farm & Villager Governor, Elytra/Chunk-Load     │
+│    Surge Guard, TNT Explosion Item Buffer, dynamic view/sim distance   │
 │  • Seamless fallback to in-process Rust Governor if run standalone     │
 └──────────────────────────────────┬─────────────────────────────────────┘
                                    │ Zero-Copy DirectByteBuffer (0 GC)
 ┌──────────────────────────────────▼─────────────────────────────────────┐
 │  3) spica-native (.dll / .so — In-Process Rust Compute Engine)         │
 │  • Flat CSR O(N) Spatial Hash Grid + Rayon work-stealing pool          │
-│  • Collision/density, AI targeting + LOD, Farm & Villager Governor,    │
-│    Boids steering, O(N) Chunk Heatmap, Item-Merge planner, Governor    │
+│  • Collisions, AI LOD, Farm/Villager Governor, Surge Guard, Boids,     │
+│    Chunk Heatmap, Item-Merge, 2D Flow-Field Pathfinding, FBM Noise     │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -77,9 +77,11 @@ Measured directly inside the running Purpur 1.21.4 JVM (**5,000 entities, 100 pl
 - **Standalone Rust Engine (`cargo run --release -p spica-rust-native --bin bench`):**
   - Chunk Density Heatmap (5,000 entities): `0.249 ms/tick`
   - Item Merge Planner (2,000 items → 1,568 pairs): `0.702 ms/tick`
-  - Adaptive MSPT Governor evaluation: `5.5 ns/eval`
-  - Farm & Villager Governor (5,000 entities × 100 players): `3.685 ms` (`~0.18 ms/tick` amortized at 1s interval)
-- **Unit Test Suite:** `29/29` Rust unit tests passing (`spica-launcher`: 14/14, `spica-rust-native`: 15/15)
+  - Adaptive MSPT Governor evaluation: `5.0 ns/eval`
+  - Farm & Villager Governor (5,000 entities × 100 players): `2.194 ms` (`~0.11 ms/tick` amortized at 1s interval)
+  - 2D Flow-Field Pathfinding (128×128 = 16,384 cells w/ obstacles): `2.486 ms/eval` (O(1) per-mob lookup)
+  - Parallel 4-Octave FBM WorldGen Noise (256×256 = 65,536 blocks): `3.694 ms/eval`
+- **Unit Test Suite:** `39/39` Rust unit tests passing (`spica-launcher`: 15/15, `spica-rust-native`: 24/24)
 
 ---
 
@@ -103,7 +105,7 @@ Build the entire workspace (native engine, launcher, tests, and Purpur plugin JA
 
 Artifacts are exported to `dist/windows-x86_64/`:
 - `spica-launcher.exe` — Place next to `purpur-1.21.4.jar`
-- `SpicaRustNative-2.2.0.jar` — Place in `plugins/` (`spica_rust_native.dll` is bundled inside)
+- `SpicaRustNative-2.3.0.jar` — Place in `plugins/` (`spica_rust_native.dll` is bundled inside)
 
 Run Purpur under the Rust Brain:
 
@@ -159,6 +161,8 @@ Every push/PR to `main` and version tag (`v*`) runs [`.github/workflows/ci-relea
 | :--- | :--- |
 | `/rustbridge brain` | Displays Brain mode (`LAUNCHER IPC` / `IN-PROCESS RUST`), health state, EWMA MSPT, live view/sim distance, dynamic AI ranges, and total Rust-merged items. |
 | `/rustbridge farms` | Displays live Mob-Farm & Villager Governor stats: throttled farm mobs, collision-disabled mobs, throttled trading-hall villagers, restock pulse countdown, and active thresholds. |
+| `/rustbridge surge` | Displays live Elytra / Chunk-Load Surge Guard & Explosion Item Buffer stats (chunks/sec, Elytra clamps, buffered explosions, merged debris items). |
+| `/rustbridge kernels` | Runs an **async** live Rust benchmark of 128×128 Flow-Field Pathfinding + 256×256 FBM WorldGen Noise inside the running JVM. |
 | `/rustbridge chunks [world]` | Runs the Rust $O(N)$ Chunk Heatmap and lists the Top 8 densest/most crowded chunks with chunk & block coordinates. |
 | `/rustbridge status` | Shows native engine info, Rayon worker count, and AI LOD optimizer stats. |
 | `/rustbridge scan [world]` | Scans all live mobs with Rust Spatial Hash to locate entity-cramming / mob-farm hotspots. |

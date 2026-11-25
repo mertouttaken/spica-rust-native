@@ -99,6 +99,10 @@ pub struct TelemetryPayload {
     pub farm_throttled: u32,
     #[serde(rename = "villagersThrottled", default)]
     pub villagers_throttled: u32,
+    #[serde(rename = "elytraClamps", default)]
+    pub elytra_clamps: u64,
+    #[serde(rename = "explosionItemsMerged", default)]
+    pub explosion_items_merged: u64,
     #[serde(default)]
     pub players: u32,
     #[serde(rename = "loadedChunks", default)]
@@ -145,6 +149,8 @@ pub struct BrainSnapshot {
     pub hibernated: u32,
     pub farm_throttled: u32,
     pub villagers_throttled: u32,
+    pub elytra_clamps: u64,
+    pub explosion_items_merged: u64,
     pub players: u32,
     pub loaded_chunks: u32,
     pub heap_used_mb: u64,
@@ -189,6 +195,8 @@ pub struct BrainState {
     pub hibernated: u32,
     pub farm_throttled: u32,
     pub villagers_throttled: u32,
+    pub elytra_clamps: u64,
+    pub explosion_items_merged: u64,
     pub players: u32,
     pub loaded_chunks: u32,
     pub heap_used_mb: u64,
@@ -298,6 +306,8 @@ impl BrainState {
             hibernated: 0,
             farm_throttled: 0,
             villagers_throttled: 0,
+            elytra_clamps: 0,
+            explosion_items_merged: 0,
             players: 0,
             loaded_chunks: 0,
             heap_used_mb: 0,
@@ -387,6 +397,8 @@ impl BrainState {
         self.hibernated = telemetry.hibernated;
         self.farm_throttled = telemetry.farm_throttled;
         self.villagers_throttled = telemetry.villagers_throttled;
+        self.elytra_clamps = telemetry.elytra_clamps;
+        self.explosion_items_merged = telemetry.explosion_items_merged;
         self.players = telemetry.players;
         self.loaded_chunks = telemetry.loaded_chunks;
         self.heap_used_mb = telemetry.heap_used_mb;
@@ -449,6 +461,8 @@ impl BrainState {
             hibernated: self.hibernated,
             farm_throttled: self.farm_throttled,
             villagers_throttled: self.villagers_throttled,
+            elytra_clamps: self.elytra_clamps,
+            explosion_items_merged: self.explosion_items_merged,
             players: self.players,
             loaded_chunks: self.loaded_chunks,
             heap_used_mb: self.heap_used_mb,
@@ -479,6 +493,8 @@ mod tests {
             hibernated: 120,
             farm_throttled: 0,
             villagers_throttled: 0,
+            elytra_clamps: 0,
+            explosion_items_merged: 0,
             players: 18,
             loaded_chunks: 1600,
             heap_used_mb: 2400,
@@ -641,6 +657,64 @@ mod tests {
     }
 
     #[test]
+    fn test_surge_guard_telemetry_roundtrip_and_defaults() {
+        let mut brain = BrainState::new(BrainConfig::default(), 4096, 16384);
+
+        // 1. Telemetry containing elytraClamps & explosionItemsMerged
+        let json_with_surge = r#"{
+            "type": "telemetry",
+            "mspt": 24.0,
+            "tps": 20.0,
+            "entities": 512,
+            "hibernated": 90,
+            "farmThrottled": 30,
+            "villagersThrottled": 12,
+            "elytraClamps": 14,
+            "explosionItemsMerged": 480,
+            "players": 16,
+            "loadedChunks": 1400,
+            "heapUsedMb": 2560,
+            "heapMaxMb": 8192
+        }"#;
+        let payload: TelemetryPayload = serde_json::from_str(json_with_surge)
+            .expect("deserialize telemetry with surge guard fields");
+        assert_eq!(payload.elytra_clamps, 14);
+        assert_eq!(payload.explosion_items_merged, 480);
+
+        let _ = brain.ingest_telemetry(&payload);
+        let snap = brain.snapshot();
+        assert_eq!(snap.elytra_clamps, 14);
+        assert_eq!(snap.explosion_items_merged, 480);
+
+        let snap_json = serde_json::to_value(&snap).expect("serialize snapshot");
+        assert_eq!(snap_json["elytraClamps"], 14);
+        assert_eq!(snap_json["explosionItemsMerged"], 480);
+
+        // 2. Legacy telemetry omitting elytraClamps & explosionItemsMerged defaults both to 0
+        let legacy_json = r#"{
+            "type": "telemetry",
+            "mspt": 18.5,
+            "tps": 20.0,
+            "entities": 280,
+            "hibernated": 35,
+            "players": 8,
+            "loadedChunks": 800,
+            "heapUsedMb": 1400,
+            "heapMaxMb": 8192
+        }"#;
+        let legacy_payload: TelemetryPayload =
+            serde_json::from_str(legacy_json).expect("deserialize legacy telemetry");
+        assert_eq!(legacy_payload.elytra_clamps, 0);
+        assert_eq!(legacy_payload.explosion_items_merged, 0);
+
+        let _ = brain.ingest_telemetry(&legacy_payload);
+        let legacy_snap_json =
+            serde_json::to_value(&brain.snapshot()).expect("serialize legacy snapshot");
+        assert_eq!(legacy_snap_json["elytraClamps"], 0);
+        assert_eq!(legacy_snap_json["explosionItemsMerged"], 0);
+    }
+
+    #[test]
     fn test_history_ring_buffer_caps_at_120_and_preserves_newest() {
         let mut brain = BrainState::new(BrainConfig::default(), 4096, 16384);
         brain.update_host_metrics(28.4, 5120, 16384);
@@ -653,6 +727,8 @@ mod tests {
                 hibernated: tick / 2,
                 farm_throttled: tick / 3,
                 villagers_throttled: tick / 5,
+                elytra_clamps: tick as u64,
+                explosion_items_merged: (tick as u64) * 2,
                 players: 10,
                 loaded_chunks: 1000,
                 heap_used_mb: 2048 + tick as u64,

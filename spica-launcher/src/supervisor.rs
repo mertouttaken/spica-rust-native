@@ -200,6 +200,10 @@ fn print_stats(brain: &Arc<Mutex<BrainState>>) {
         s.hibernated, s.farm_throttled, s.villagers_throttled
     );
     println!(
+        "  Surge Guard    : Elytra Clamps={} | Explosion Items Merged={}",
+        s.elytra_clamps, s.explosion_items_merged
+    );
+    println!(
         "  Calisma Suresi : {} sn | Brain: {}",
         s.uptime_secs, s.state
     );

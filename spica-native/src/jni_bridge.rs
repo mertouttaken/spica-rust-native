@@ -11,7 +11,7 @@ use jni::objects::{JByteBuffer, JClass};
 use jni::sys::{jfloat, jint, jlong, jstring};
 use jni::JNIEnv;
 
-use crate::{farm_governor, governor, heatmap, kernels};
+use crate::{farm_governor, flowfield, governor, heatmap, kernels, noise, surge_guard};
 
 /// Safely view a Java DirectByteBuffer as an immutable slice `&[T]`.
 unsafe fn buf_as_slice<'a, T>(
@@ -562,6 +562,176 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
                 brain_state_code,
                 out_actions,
                 out_neighbor_counts,
+            )
+        })
+    }))
+    .unwrap_or(-1)
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments, unused_mut)]
+pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_nativeEvaluatePlayerSurges<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    player_count: jint,
+    px_buf: JByteBuffer<'local>,
+    py_buf: JByteBuffer<'local>,
+    pz_buf: JByteBuffer<'local>,
+    vx_buf: JByteBuffer<'local>,
+    vy_buf: JByteBuffer<'local>,
+    vz_buf: JByteBuffer<'local>,
+    is_gliding_buf: JByteBuffer<'local>,
+    brain_state_code: jint,
+    base_max_elytra_speed: jfloat,
+    out_actions_buf: JByteBuffer<'local>,
+    out_clamped_vx_buf: JByteBuffer<'local>,
+    out_clamped_vy_buf: JByteBuffer<'local>,
+    out_clamped_vz_buf: JByteBuffer<'local>,
+) -> jint {
+    if player_count <= 0 {
+        return 0;
+    }
+    let n = player_count as usize;
+
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Ok(px) = buf_as_slice::<f32>(&mut env, &px_buf, n) else { return -1; };
+        let Ok(py) = buf_as_slice::<f32>(&mut env, &py_buf, n) else { return -1; };
+        let Ok(pz) = buf_as_slice::<f32>(&mut env, &pz_buf, n) else { return -1; };
+        let Ok(vx) = buf_as_slice::<f32>(&mut env, &vx_buf, n) else { return -1; };
+        let Ok(vy) = buf_as_slice::<f32>(&mut env, &vy_buf, n) else { return -1; };
+        let Ok(vz) = buf_as_slice::<f32>(&mut env, &vz_buf, n) else { return -1; };
+        let Ok(is_gliding) = buf_as_slice::<i32>(&mut env, &is_gliding_buf, n) else { return -1; };
+        let Ok(out_actions) = buf_as_mut_slice::<i32>(&mut env, &out_actions_buf, n) else {
+            return -1;
+        };
+        let Ok(out_cvx) = buf_as_mut_slice::<f32>(&mut env, &out_clamped_vx_buf, n) else {
+            return -1;
+        };
+        let Ok(out_cvy) = buf_as_mut_slice::<f32>(&mut env, &out_clamped_vy_buf, n) else {
+            return -1;
+        };
+        let Ok(out_cvz) = buf_as_mut_slice::<f32>(&mut env, &out_clamped_vz_buf, n) else {
+            return -1;
+        };
+
+        surge_guard::evaluate_player_surges(
+            px,
+            py,
+            pz,
+            vx,
+            vy,
+            vz,
+            is_gliding,
+            brain_state_code,
+            base_max_elytra_speed,
+            out_actions,
+            out_cvx,
+            out_cvy,
+            out_cvz,
+        )
+    }))
+    .unwrap_or(-1)
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments, unused_mut)]
+pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_nativeComputeFlowField<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    width: jint,
+    depth: jint,
+    cost_grid_buf: JByteBuffer<'local>,
+    goal_x: jint,
+    goal_z: jint,
+    out_dist_buf: JByteBuffer<'local>,
+    out_dir_x_buf: JByteBuffer<'local>,
+    out_dir_z_buf: JByteBuffer<'local>,
+) -> jint {
+    if width <= 0 || depth <= 0 || goal_x < 0 || goal_z < 0 {
+        return 0;
+    }
+    let w = width as usize;
+    let d = depth as usize;
+    let gx = goal_x as usize;
+    let gz = goal_z as usize;
+    if gx >= w || gz >= d {
+        return 0;
+    }
+    let Some(len) = w.checked_mul(d) else {
+        return -1;
+    };
+    if len > flowfield::MAX_FLOW_FIELD_CELLS {
+        return -1;
+    }
+
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Ok(cost_grid) = buf_as_slice::<u8>(&mut env, &cost_grid_buf, len) else { return -1; };
+        let Ok(out_dist) = buf_as_mut_slice::<f32>(&mut env, &out_dist_buf, len) else {
+            return -1;
+        };
+        let Ok(out_dir_x) = buf_as_mut_slice::<f32>(&mut env, &out_dir_x_buf, len) else {
+            return -1;
+        };
+        let Ok(out_dir_z) = buf_as_mut_slice::<f32>(&mut env, &out_dir_z_buf, len) else {
+            return -1;
+        };
+
+        crate::run_in_pool(|| {
+            flowfield::compute_flow_field(
+                w, d, cost_grid, gx, gz, out_dist, out_dir_x, out_dir_z,
+            )
+        })
+    }))
+    .unwrap_or(-1)
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments, unused_mut)]
+pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_nativeGenerateNoise2D<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    origin_x: jfloat,
+    origin_z: jfloat,
+    width: jint,
+    depth: jint,
+    step: jfloat,
+    seed: jint,
+    octaves: jint,
+    frequency: jfloat,
+    lacunarity: jfloat,
+    persistence: jfloat,
+    out_heights_buf: JByteBuffer<'local>,
+) -> jint {
+    if width <= 0 || depth <= 0 {
+        return 0;
+    }
+    let w = width as usize;
+    let d = depth as usize;
+    let Some(total) = w.checked_mul(d) else {
+        return -1;
+    };
+    if total > i32::MAX as usize {
+        return -1;
+    }
+
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        let Ok(out_heights) = buf_as_mut_slice::<f32>(&mut env, &out_heights_buf, total) else {
+            return -1;
+        };
+
+        crate::run_in_pool(|| {
+            noise::generate_noise_2d(
+                origin_x,
+                origin_z,
+                w,
+                d,
+                step,
+                seed,
+                octaves,
+                frequency,
+                lacunarity,
+                persistence,
+                out_heights,
             )
         })
     }))

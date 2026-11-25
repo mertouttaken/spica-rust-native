@@ -5,6 +5,7 @@ import net.spicanetwork.rustnative.nativebridge.EntityBatchArena;
 import net.spicanetwork.rustnative.nativebridge.NativeLoader;
 import net.spicanetwork.rustnative.nativebridge.RustNative;
 
+import java.nio.ByteBuffer;
 import java.util.Locale;
 
 /**
@@ -367,6 +368,151 @@ public final class SpicaRustAPI {
             safeState,
             arena.outIntABuf,
             arena.outIntBBuf
+        );
+    }
+
+    /**
+     * Evaluates gliding players for Elytra / chunk-load velocity surges in Rust.
+     *
+     * Inputs in {@code arena}: {@code x, y, z}, {@code vx, vy, vz}, and gliding flag in {@code flags} (1 = gliding).
+     * Outputs in {@code arena}:
+     * - {@code outIntA}: action code ({@link RustNative#SURGE_OK}, {@link RustNative#SURGE_WARN},
+     *   {@link RustNative#SURGE_CLAMP_VELOCITY})
+     * - {@code outX, outY, outZ}: clamped velocity components when action is {@link RustNative#SURGE_CLAMP_VELOCITY}
+     */
+    public int evaluatePlayerSurges(
+        EntityBatchArena arena,
+        int playerCount,
+        int brainStateCode,
+        float baseMaxElytraSpeed
+    ) {
+        ensureLoaded();
+        if (playerCount <= 0) {
+            return 0;
+        }
+        int clampedPlayers = Math.min(playerCount, arena.getEntityCapacity());
+        int safeState = Math.clamp(brainStateCode, BrainDirective.STATE_GREEN, BrainDirective.STATE_EMERGENCY);
+        float safeBaseSpeed = Float.isFinite(baseMaxElytraSpeed) && baseMaxElytraSpeed > 0.1f
+            ? baseMaxElytraSpeed
+            : 1.8f;
+
+        return RustNative.nativeEvaluatePlayerSurges(
+            clampedPlayers,
+            arena.xBuf,
+            arena.yBuf,
+            arena.zBuf,
+            arena.vxBuf,
+            arena.vyBuf,
+            arena.vzBuf,
+            arena.flagsBuf,
+            safeState,
+            safeBaseSpeed,
+            arena.outIntABuf,
+            arena.outXBuf,
+            arena.outYBuf,
+            arena.outZBuf
+        );
+    }
+
+    /**
+     * Computes a 2D Dijkstra integration distance field and normalized steering flow-field
+     * around obstacles toward {@code (goalX, goalZ)}.
+     *
+     * All buffers MUST be direct ByteBuffers in native byte order.
+     */
+    public int computeFlowField(
+        int width,
+        int depth,
+        ByteBuffer costGrid,
+        int goalX,
+        int goalZ,
+        ByteBuffer outDist,
+        ByteBuffer outDirX,
+        ByteBuffer outDirZ
+    ) {
+        ensureLoaded();
+        if (width <= 0 || depth <= 0) {
+            return 0;
+        }
+        if (costGrid == null || outDist == null || outDirX == null || outDirZ == null) {
+            throw new IllegalArgumentException("Flow-field ByteBuffers must not be null.");
+        }
+        if (!costGrid.isDirect() || !outDist.isDirect() || !outDirX.isDirect() || !outDirZ.isDirect()) {
+            throw new IllegalArgumentException("Flow-field ByteBuffers must be direct (ByteBuffer.allocateDirect).");
+        }
+        long cells = (long) width * (long) depth;
+        if (cells > Integer.MAX_VALUE / Float.BYTES) {
+            throw new IllegalArgumentException("Flow-field grid dimensions overflow buffer limits.");
+        }
+        int floatBytes = (int) (cells * Float.BYTES);
+        if (costGrid.capacity() < cells
+            || outDist.capacity() < floatBytes
+            || outDirX.capacity() < floatBytes
+            || outDirZ.capacity() < floatBytes) {
+            throw new IllegalArgumentException("Flow-field ByteBuffers are smaller than required grid size.");
+        }
+
+        return RustNative.nativeComputeFlowField(
+            width,
+            depth,
+            costGrid,
+            goalX,
+            goalZ,
+            outDist,
+            outDirX,
+            outDirZ
+        );
+    }
+
+    /**
+     * Generates a 2D multi-octave Fractal Brownian Motion (FBM) world-generation noise field
+     * into {@code outHeights} (direct native-order {@code float} ByteBuffer of {@code width * depth * 4} bytes).
+     */
+    public int generateNoise2D(
+        float originX,
+        float originZ,
+        int width,
+        int depth,
+        float step,
+        int seed,
+        int octaves,
+        float frequency,
+        float lacunarity,
+        float persistence,
+        ByteBuffer outHeights
+    ) {
+        ensureLoaded();
+        if (width <= 0 || depth <= 0) {
+            return 0;
+        }
+        if (outHeights == null || !outHeights.isDirect()) {
+            throw new IllegalArgumentException("outHeights must be a non-null direct ByteBuffer.");
+        }
+        long cells = (long) width * (long) depth;
+        if (cells > Integer.MAX_VALUE / Float.BYTES || outHeights.capacity() < cells * Float.BYTES) {
+            throw new IllegalArgumentException("outHeights buffer is smaller than width * depth * 4 bytes.");
+        }
+
+        float safeOriginX = Float.isFinite(originX) ? originX : 0f;
+        float safeOriginZ = Float.isFinite(originZ) ? originZ : 0f;
+        float safeStep = Float.isFinite(step) && step > 0f ? step : 1.0f;
+        int safeOctaves = Math.clamp(octaves, 1, 16);
+        float safeFreq = Float.isFinite(frequency) && frequency > 0f ? frequency : 0.01f;
+        float safeLacunarity = Float.isFinite(lacunarity) && lacunarity > 0f ? lacunarity : 2.0f;
+        float safePersistence = Float.isFinite(persistence) && persistence > 0f ? persistence : 0.5f;
+
+        return RustNative.nativeGenerateNoise2D(
+            safeOriginX,
+            safeOriginZ,
+            width,
+            depth,
+            safeStep,
+            seed,
+            safeOctaves,
+            safeFreq,
+            safeLacunarity,
+            safePersistence,
+            outHeights
         );
     }
 
