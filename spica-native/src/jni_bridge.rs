@@ -102,6 +102,59 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
 const NATIVE_ABI_REV: u32 = 2;
 
 #[no_mangle]
+pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_nativeOpenTrackingIndex<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+) -> jlong {
+    catch_unwind(chunk_tracking::open_index).ok().flatten().unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_nativeCloseTrackingIndex<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    let _ = catch_unwind(|| chunk_tracking::close_index(handle));
+}
+
+#[no_mangle]
+pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_nativeUpdateTrackingIndex<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    slot_count: jint,
+    delta_count: jint,
+    deltas: JByteBuffer<'local>,
+    player_count: jint,
+    players: JByteBuffer<'local>,
+    pairs: JByteBuffer<'local>,
+) -> jint {
+    catch_unwind(AssertUnwindSafe(|| -> Result<jint, FfiGuardError> {
+        if !(0..=chunk_tracking::MAX_PLAYERS as jint).contains(&player_count)
+            || !(0..=chunk_tracking::MAX_MOBS as jint).contains(&slot_count)
+            || !(0..=slot_count).contains(&delta_count)
+        {
+            return Ok(-1);
+        }
+        let p = player_count as usize;
+        let m = slot_count as usize;
+        let mut spans = SpanValidator::new();
+        let deltas = register_jni_read(&mut env, &mut spans, &deltas, 3 * delta_count as usize)?;
+        let players = register_jni_read(&mut env, &mut spans, &players, 2 * p)?;
+        let mut pairs = register_jni_write(&mut env, &mut spans, &pairs, (p * m).div_ceil(64))?;
+        // Java owns the buffers for this call. The index retains coordinates, never JNI pointers.
+        let count = unsafe {
+            chunk_tracking::update_index(handle, m, deltas.as_slice(), players.as_slice(), pairs.as_mut_slice())
+        };
+        Ok(count.unwrap_or(-1))
+    }))
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or(-1)
+}
+
+#[no_mangle]
 pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_nativeQueryTrackingChunks<
     'local,
 >(

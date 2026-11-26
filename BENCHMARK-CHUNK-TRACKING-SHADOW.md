@@ -71,3 +71,25 @@ python benchmarks/chunk_tracking_shadow.py --seed .test-server --output $out `
 ```
 
 `--output` yeni bir dizin olmalı. Dönüşümlü ölçümü tek başına çalıştırmak için `--rounds 0 --skip-verify` eklenebilir. Her koşu kendi stdout, bot raporu ve tick CSV’sini yazar. `results.json` dünya dosyalarının SHA-256 özetlerini ve pencere metriklerini içerir.
+
+## Artımlı Rust pilotu
+
+Karşılaştırmanın tabanı, `3abb845` sürümündeki tam mob görüntüsü ve her tick yeniden kurulan chunk indeksiyle çalışan Rust yoludur. Artımlı yol dünyayı ilk etkinleştiğinde bir kez tarar. Dünya yaşam döngüsü olayları Java’daki mob listesini günceller. Pilot her tick bu listedeki canlı mobların X/Z koordinatlarını okur, değişen konumları ve silinen kayıtları tek bir toplu JNI çağrısında gönderir. Oyuncu koordinatları her sorguda gönderilir.
+
+Rust dünya başına chunk indeksini çağrılar arasında tutar. Chunk içi hareket konumu günceller, chunk değişimi kaydı ilgili kovaya taşır. Dünya kapanınca ya da pilot devreden çıkınca yerel indeks serbest bırakılır. Bitiş çıktısı aynı 48 blok aday kuralını kullanır. Ölçüm kopyasında spawn, chunk’lar arası mob teleportu ve ölüm de birebir eşitlik koşusuna dahil edilir. Gölge test eklentisi Paper’ın entity tracking ve paket gönderimini etkilemeden ölçüm alır.
+
+Yukarıdaki komutta `--interleave` yerine `--incremental --rounds 0` vererek bu karşılaştırma çalıştırılabilir. Her senaryoda aynı JVM içinde sırayla A/B ve B/A olmak üzere sekiz çift alınır. Dört saniyelik her pencereden önce iki saniye ayrılır. Bu süre ilk indeks doldurma maliyetini ölçüm penceresinin dışında tutar. Tick başına toplam hesap sürelerine Java’daki yaşam döngüsü işleyicilerinin süresi de eklenir. İki penceresi de en az 40 tick içeren ve ortam yükü en fazla 5 yüzde puan ayrışan çiftler eşleşir.
+
+`-Xcheck:jni` ile 347 canlı tick’te aday bitleri birebir eşleşti. Zorunlu mob teleportu 48 blok menzil sınırını aştı ve ölüm sonrası bir silme kaydı gözlendi. 42 SHA-256 özeti önceki pilotun aynı dünya kopyasını doğruladı.
+
+20 botun hazır kaldığı ve erken kopma olmayan A/B tekrarında 48 pencere ile 3.820 tick kaydedildi. Tabloda ortam yükü eşleşen 9 çiftin 1.445 tick’i kullanıldı. Hücreler önce eski Rust pilotunu, ardından artımlı yolu gösterir. Mob satırı, tick başına medyandır ve konumu güncellenen kayıtları sayar. Ölçüm pencerelerinde mob silme kaydı oluşmadı.
+
+| Senaryo | Eşleşen çift | Toplam µs/tick | Rust’a giren mob satırı/tick | JVM CPU-s / 20 sn | Tick p99 (ms) |
+|---|---:|---:|---:|---:|---:|
+| Yoğun farm | 3/8 | 1.352,9 → 664,1 (−%50,9) | 1.030 → 318 (−%69,1) | 62,50 → 63,05 (+%0,9) | 122,99 → 74,61 (−%39,3) |
+| Dağınık | 2/8 | 859,9 → 356,6 (−%58,5) | 1.030 → 426 (−%58,6) | 39,92 → 31,83 (−%20,3) | 77,79 → 34,80 (−%55,3) |
+| Teleport | 4/8 | 724,3 → 271,6 (−%62,5) | 1.030 → 359 (−%65,1) | 14,99 → 12,18 (−%18,8) | 31,85 → 30,28 (−%4,9) |
+
+Artımlı yol toplam aday hesaplama süresini 0,45–0,69 ms/tick azalttı. Tüm pencereler dahil edildiğinde de düşüş üç senaryoda %51,6–69,0 aralığındaydı. Kazanç dünya taramasının ve Java’da indeksin baştan kurulmasının kalkmasıyla geldi. Rust tarafında güncelleme ve sorgu birlikte çalıştığından JNI çağrısının kendi süresi eşleşen pencerelerde 36–119 µs bandından 50–149 µs bandına çıktı.
+
+JVM CPU ve tick p99 bütün sunucuyu kapsar. Örneğin dağınık senaryonun p99’u eşleşen iki çiftte %55,3 düştü, tüm sekiz çiftte %16,0 yükseldi. Bu örneklerle aday hesaplama süresindeki düşüş tekrarlanabilirdi. JVM CPU ve p99 farklarını artımlı indekse bağlamak için daha fazla eşleşen pencere gerekir.

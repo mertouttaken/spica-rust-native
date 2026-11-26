@@ -75,6 +75,24 @@ public final class RustNative {
         ByteBuffer chunkTable, ByteBuffer nextMob, ByteBuffer outPairs
     );
 
+    /** Opens a shadow tracking index. A zero handle indicates failure. */
+    public static native long nativeOpenTrackingIndex();
+
+    /** Releases a shadow tracking index. Closing an already released handle is harmless. */
+    public static native void nativeCloseTrackingIndex(long handle);
+
+    /**
+     * Applies one batch of changed slots, then writes a player-major bitset with a stride of
+     * {@code slotCount}. Each 24-byte delta contains a long slot token and two X/Z doubles.
+     * A bitwise-complemented slot token removes that slot. Other tokens insert or update it.
+     * Slot count starts at zero and grows to at most 16,384, including reusable vacant slots.
+     * Returns the number of candidate pairs within 48 horizontal blocks or -1 on failure.
+     */
+    public static native int nativeUpdateTrackingIndex(
+        long handle, int slotCount, int deltaCount, ByteBuffer deltas,
+        int playerCount, ByteBuffer playersXZ, ByteBuffer outPairs
+    );
+
     /**
      * Batch Spatial-Hash Entity-Entity soft collision & neighbor density calculation.
      */

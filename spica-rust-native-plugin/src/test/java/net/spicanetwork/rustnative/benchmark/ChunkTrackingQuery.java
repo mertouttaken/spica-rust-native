@@ -26,7 +26,7 @@ final class ChunkTrackingQuery {
     private final long[] expected = new long[pairs.capacity()];
     private int slots;
 
-    private static ByteBuffer direct(int bytes) {
+    static ByteBuffer direct(int bytes) {
         return ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
     }
 
@@ -36,6 +36,18 @@ final class ChunkTrackingQuery {
 
     void mob(int index, double x, double z) {
         mobs.put(2 * index, x).put(2 * index + 1, z);
+    }
+
+    ByteBuffer playerInput() {
+        return playerBytes;
+    }
+
+    boolean candidate(int player, int mobCount, int mob) {
+        return isSet(pairs, player * mobCount + mob);
+    }
+
+    static boolean isSet(LongBuffer pairs, int bit) {
+        return (pairs.get(bit >>> 6) & (1L << (bit & 63))) != 0;
     }
 
     private static int chunk(double coord) {

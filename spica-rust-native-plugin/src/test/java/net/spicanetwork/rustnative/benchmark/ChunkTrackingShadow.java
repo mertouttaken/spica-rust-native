@@ -25,14 +25,16 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 /** Opt-in test plugin for an isolated Purpur process. Computes and observes only. */
 public final class ChunkTrackingShadow extends JavaPlugin implements Listener {
-    private enum Backend { FULL, JAVA, RUST, VERIFY }
+    private enum Backend { FULL, JAVA, RUST, INCREMENTAL, VERIFY }
     private enum Phase { IDLE, DENSE, SPREAD, TELEPORT }
 
     private final ChunkTrackingQuery query = new ChunkTrackingQuery();
     private final Location scratch = new Location(null, 0, 0, 0);
     private final OperatingSystemMXBean os = ManagementFactory.getPlatformMXBean(OperatingSystemMXBean.class);
     private final Sample[] samples = new Sample[16_384];
+    private final Mob[] verificationMobs = new Mob[ChunkTrackingQuery.MAX_MOBS];
     private Backend backend;
+    private ChunkTrackingIncremental incremental;
     private boolean interleaved;
     private Phase phase = Phase.IDLE;
     private int window;
@@ -46,20 +48,45 @@ public final class ChunkTrackingShadow extends JavaPlugin implements Listener {
     private int mobs;
     private int matches;
     private int comparisons;
+    private int upserts;
+    private int removals;
     private boolean failed;
 
     @Override
     public void onEnable() {
         String mode = System.getProperty("spica.shadow.backend").toUpperCase(Locale.ROOT);
         interleaved = mode.equals("INTERLEAVED");
-        backend = interleaved ? Backend.FULL : Backend.valueOf(mode);
         System.load(Path.of(System.getProperty("spica.shadow.library")).toAbsolutePath().toString());
         RustNative.nativeInitPool(4);
+        useBackend(interleaved ? Backend.FULL : Backend.valueOf(mode));
         if (backend == Backend.VERIFY) {
             verifyBoundary();
         }
         Bukkit.getPluginManager().registerEvents(this, this);
         getLogger().info("SHADOW_READY " + mode);
+    }
+
+    private static boolean usesIncremental(Backend mode) {
+        return mode == Backend.INCREMENTAL || mode == Backend.VERIFY;
+    }
+
+    private void useBackend(Backend next) {
+        if (usesIncremental(next) && !usesIncremental(backend)) {
+            if (incremental == null) {
+                incremental = new ChunkTrackingIncremental();
+            }
+            Bukkit.getPluginManager().registerEvents(incremental, this);
+        } else if (usesIncremental(backend) && !usesIncremental(next)) {
+            incremental.close();
+        }
+        backend = next;
+    }
+
+    @Override
+    public void onDisable() {
+        if (incremental != null) {
+            incremental.close();
+        }
     }
 
     private void verifyBoundary() {
@@ -90,7 +117,7 @@ public final class ChunkTrackingShadow extends JavaPlugin implements Listener {
                 if (!interleaved || nextBackend == Backend.VERIFY) {
                     return false;
                 }
-                backend = nextBackend;
+                useBackend(nextBackend);
             }
             phase = nextPhase;
         } catch (IllegalArgumentException invalidPhase) {
@@ -112,6 +139,8 @@ public final class ChunkTrackingShadow extends JavaPlugin implements Listener {
         mobs = 0;
         matches = 0;
         comparisons = 0;
+        upserts = 0;
+        removals = 0;
         indexNs = 0;
         evaluationNs = 0;
         try {
@@ -132,25 +161,43 @@ public final class ChunkTrackingShadow extends JavaPlugin implements Listener {
         if (worldPlayers.isEmpty()) {
             return;
         }
-        var worldMobs = world.getEntitiesByClass(Mob.class);
-        if (worldPlayers.size() > ChunkTrackingQuery.MAX_PLAYERS || worldMobs.size() > ChunkTrackingQuery.MAX_MOBS) {
-            throw new IllegalStateException("World exceeds shadow snapshot capacity");
+        if (worldPlayers.size() > ChunkTrackingQuery.MAX_PLAYERS) {
+            throw new IllegalStateException("World exceeds shadow player capacity");
         }
         int pc = 0;
         for (Player player : worldPlayers) {
             player.getLocation(scratch);
             query.player(pc++, scratch.getX(), scratch.getZ());
         }
+        players += pc;
+        if (backend == Backend.INCREMENTAL) {
+            var state = incremental.world(world);
+            matches += queryIncremental(state, pc);
+            mobs += state.liveCount;
+            comparisons += pc * state.liveCount;
+            return;
+        }
+
+        var worldMobs = world.getEntitiesByClass(Mob.class);
+        if (worldMobs.size() > ChunkTrackingQuery.MAX_MOBS) {
+            throw new IllegalStateException("World exceeds shadow mob capacity");
+        }
         int mc = 0;
         for (Mob mob : worldMobs) {
             if (mob.isValid() && !mob.isDead()) {
+                if (backend == Backend.VERIFY) {
+                    verificationMobs[mc] = mob;
+                }
                 mob.getLocation(scratch);
                 query.mob(mc++, scratch.getX(), scratch.getZ());
             }
         }
-        players += pc;
         mobs += mc;
         comparisons += pc * mc;
+        if (backend == Backend.VERIFY) {
+            matches += verifyWorld(world, pc, mc);
+            return;
+        }
         if (mc == 0) {
             return;
         }
@@ -163,14 +210,50 @@ public final class ChunkTrackingShadow extends JavaPlugin implements Listener {
             case FULL -> query.fullScan(pc, mc);
             case JAVA -> query.indexedJava(pc, mc);
             case RUST -> query.indexedRust(pc, mc);
-            case VERIFY -> query.verify(pc, mc);
+            default -> throw new IllegalStateException("Unexpected snapshot backend " + backend);
         };
         evaluationNs += System.nanoTime() - indexed;
         indexNs += indexed - start;
     }
 
+    private int queryIncremental(ChunkTrackingIncremental.WorldIndex state, int pc) {
+        long start = System.nanoTime();
+        incremental.stage(state);
+        long staged = System.nanoTime();
+        int result = incremental.query(state, pc, query.playerInput());
+        evaluationNs += System.nanoTime() - staged;
+        indexNs += staged - start;
+        upserts += state.upserts;
+        removals += state.removals;
+        return result;
+    }
+
+    private int verifyWorld(World world, int pc, int mc) {
+        try {
+            int expected = mc > 0 ? query.verify(pc, mc) : 0;
+            var state = incremental.world(world);
+            int actual = queryIncremental(state, pc);
+            if (state.liveCount != mc || expected != actual) {
+                throw new IllegalStateException("Incremental snapshot count mismatch: mobs=" + state.liveCount
+                    + "/" + mc + ", candidates=" + actual + "/" + expected);
+            }
+            for (int m = 0; m < mc; m++) {
+                int slot = incremental.slotOf(state, verificationMobs[m]);
+                for (int p = 0; p < pc; p++) {
+                    if (query.candidate(p, mc, m) != incremental.candidate(state, p, slot)) {
+                        throw new IllegalStateException("Incremental candidate differs at player " + p + ", mob " + m);
+                    }
+                }
+            }
+            return actual;
+        } finally {
+            Arrays.fill(verificationMobs, 0, mc, null);
+        }
+    }
+
     @EventHandler(priority = EventPriority.MONITOR)
     public void tickEnd(ServerTickEndEvent event) {
+        long eventNanos = usesIncremental(backend) ? incremental.takeEventNanos() : 0;
         if (phase == Phase.IDLE || window != tickWindow || failed || tick != event.getTickNumber() || players != 20) {
             return;
         }
@@ -179,17 +262,17 @@ public final class ChunkTrackingShadow extends JavaPlugin implements Listener {
             getLogger().severe("SHADOW_FAILED sample capacity exceeded");
             return;
         }
-        samples[sampleCount++] = new Sample(phase, window, backend, tick, event.getTickDuration(), totalNs, indexNs,
-            evaluationNs, players, mobs, matches, comparisons);
+        samples[sampleCount++] = new Sample(phase, window, backend, tick, event.getTickDuration(), totalNs + eventNanos,
+            indexNs, evaluationNs, players, mobs, matches, comparisons, upserts, removals);
     }
 
     private void writeSamples(Sample[] snapshot) {
         try (var out = Files.newBufferedWriter(Path.of("chunk-tracking.csv"))) {
-            out.write("phase,window,backend,tick,tick_ms,total_ns,index_ns,evaluation_ns,players,mobs,matches,full_pairs\n");
+            out.write("phase,window,backend,tick,tick_ms,total_ns,index_ns,evaluation_ns,players,mobs,matches,full_pairs,upserts,removals\n");
             for (Sample row : snapshot) {
                 out.write(row.phase + "," + row.window + "," + row.backend + "," + row.tick + "," + row.tickMs + "," + row.totalNs + ","
                     + row.indexNs + "," + row.evaluationNs + "," + row.players + "," + row.mobs + ","
-                    + row.matches + "," + row.comparisons + "\n");
+                    + row.matches + "," + row.comparisons + "," + row.upserts + "," + row.removals + "\n");
             }
         } catch (IOException error) {
             getLogger().severe("SHADOW_FAILED " + error);
@@ -199,5 +282,5 @@ public final class ChunkTrackingShadow extends JavaPlugin implements Listener {
     }
 
     private record Sample(Phase phase, int window, Backend backend, int tick, double tickMs, long totalNs, long indexNs,
-                          long evaluationNs, int players, int mobs, int matches, int comparisons) {}
+                          long evaluationNs, int players, int mobs, int matches, int comparisons, int upserts, int removals) {}
 }
