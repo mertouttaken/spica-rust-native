@@ -6,8 +6,9 @@ mod bot;
 mod protocol;
 
 use crate::bot::{run_bot, BenchMetrics};
+use std::io;
 use std::process::ExitCode;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
@@ -24,6 +25,7 @@ struct CliArgs {
     min_ready_pct: u32,
     prefix: String,
     json: bool,
+    snapshot_stdin: bool,
     help: bool,
     version: bool,
 }
@@ -40,6 +42,7 @@ impl Default for CliArgs {
             min_ready_pct: 90,
             prefix: "SpicaBot".to_string(),
             json: false,
+            snapshot_stdin: false,
             help: false,
             version: false,
         }
@@ -121,6 +124,7 @@ fn parse_args() -> Result<CliArgs, String> {
                 cfg.prefix = raw;
             }
             "--json" => cfg.json = true,
+            "--snapshot-stdin" => cfg.snapshot_stdin = true,
             "--help" | "-h" => cfg.help = true,
             "--version" | "-V" => cfg.version = true,
             other => {
@@ -150,6 +154,7 @@ fn print_usage() {
     println!("  --min-ready-pct <P>   Minimum ready bot % required for exit code 0 (default: 90)");
     println!("  --prefix <name>       Bot username prefix, max 11 chars (default: SpicaBot)");
     println!("  --json                Emit machine-readable JSON summary on stdout");
+    println!("  --snapshot-stdin      Accept 'snapshot' for counters and 'finish' to end measurement on stdin");
     println!("  -V, --version         Print version");
     println!("  -h, --help            Show this help");
 }
@@ -171,6 +176,36 @@ fn json_escape(input: &str) -> String {
         }
     }
     out
+}
+
+fn start_snapshot_reader(metrics: Arc<BenchMetrics>, finish_requested: Arc<AtomicBool>) -> io::Result<()> {
+    std::thread::Builder::new()
+        .name("spica-snapshots".into())
+        .spawn(move || {
+            use std::io::Write;
+            for line in io::stdin().lines().map_while(Result::ok) {
+                if line == "finish" {
+                    finish_requested.store(true, Ordering::Relaxed);
+                    break;
+                }
+                if line != "snapshot" {
+                    continue;
+                }
+                let result = writeln!(
+                    io::stderr().lock(),
+                    "SPICA_SNAPSHOT {} {} {} {} {}",
+                    u8::from(metrics.measuring.load(Ordering::Relaxed)),
+                    metrics.active_ready_play.load(Ordering::Relaxed),
+                    metrics.total_packets_in.load(Ordering::Relaxed),
+                    metrics.total_bytes_in.load(Ordering::Relaxed),
+                    metrics.total_entity_packets(),
+                );
+                if result.is_err() {
+                    break;
+                }
+            }
+        })?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -210,6 +245,13 @@ async fn main() -> ExitCode {
     }
 
     let metrics = Arc::new(BenchMetrics::default());
+    let finish_requested = Arc::new(AtomicBool::new(false));
+    if args.snapshot_stdin {
+        if let Err(error) = start_snapshot_reader(Arc::clone(&metrics), Arc::clone(&finish_requested)) {
+            eprintln!("Unable to start snapshot reader: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
     let (stop_tx, stop_rx) = watch::channel(false);
     let min_required_ready = ((args.bots as u64 * args.min_ready_pct as u64) + 99) / 100;
 
@@ -253,7 +295,7 @@ async fn main() -> ExitCode {
     let sample_step = Duration::from_millis(250);
     let measure_target = Duration::from_secs(args.duration_secs);
     let mut last_sample = measure_start;
-    while measure_start.elapsed() < measure_target {
+    while measure_start.elapsed() < measure_target && !finish_requested.load(Ordering::Relaxed) {
         let remaining = measure_target.saturating_sub(measure_start.elapsed());
         tokio::time::sleep(remaining.min(sample_step)).await;
         let now = Instant::now();
@@ -348,7 +390,13 @@ async fn main() -> ExitCode {
     }
 
     // O7: Fail run unless surviving ready bots AND sustained active bot-seconds meet threshold
-    let min_active_bot_secs = (min_required_ready as f64) * (args.duration_secs as f64) * 0.90;
+    let finish_requested = finish_requested.load(Ordering::Relaxed);
+    let target_secs = if finish_requested {
+        elapsed_secs
+    } else {
+        args.duration_secs as f64
+    };
+    let min_active_bot_secs = (min_required_ready as f64) * target_secs * 0.90;
     if ready < min_required_ready
         || surviving_ready < min_required_ready
         || active_bot_seconds < min_active_bot_secs

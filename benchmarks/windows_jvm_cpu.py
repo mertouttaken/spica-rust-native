@@ -143,17 +143,24 @@ class JvmCpuSampler:
         began = time.perf_counter_ns()
         wall = w.FILETIME()
         self.system_time(c.byref(wall))
-        total = self._times(self.process_times, int(self.process._handle))
-        if total is None:
-            raise c.WinError(c.get_last_error())
+        total = self._process_ticks(self.process)
         readings = {}
         for identity, handle in self.handles.items():
             timing = self._times(self.thread_times, handle)
             if timing is None:
                 raise c.WinError(c.get_last_error())
             readings[identity] = timing[1]
-        return {"monotonic": began, "filetime": self._ticks(wall), "process": total[1], "threads": readings,
+        return {"monotonic": began, "filetime": self._ticks(wall), "process": total, "threads": readings,
                 "read_ms": (time.perf_counter_ns() - began) / 1e6}
+
+    def _process_ticks(self, process):
+        timing = self._times(self.process_times, int(process._handle))
+        if timing is None:
+            raise c.WinError(c.get_last_error())
+        return timing[1]
+
+    def process_cpu_s(self, process):
+        return self._process_ticks(process) / TICKS_PER_SECOND
 
     def record(self, window, start, finish):
         self.boundaries[window] = start, finish

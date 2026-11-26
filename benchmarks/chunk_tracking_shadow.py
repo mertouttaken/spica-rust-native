@@ -31,7 +31,10 @@ HOOK_COST_MODES = ("dirty", "direct")
 DELTA_SETTLE_SECONDS = 2
 TURN_SECONDS = 4
 ATTRIBUTION_TURN_SECONDS = 12
+PACKET_TURN_SECONDS = 8
 BACKGROUND_MATCH_PP = 5.0
+PACKET_BOUNDARY_LIMIT_MS = 100
+PACKET_SNAPSHOT = re.compile(r"SPICA_SNAPSHOT (\d+) (\d+) (\d+) (\d+) (\d+)")
 POSITIONS = ((-80, 0), (80, 0), (0, -80), (0, 80), (80, 80))
 PLUGIN_PACKAGE = "net/spicanetwork/rustnative"
 
@@ -125,10 +128,13 @@ def paired_modes(args):
 
 def rotation(args):
     modes = paired_modes(args)
-    return (modes, modes[::-1]) * (3 if args.cpu_attribution else 4) if modes else TURNS
+    repeats = 5 if args.packet_attribution else (3 if args.cpu_attribution else 4)
+    return (modes, modes[::-1]) * repeats if modes else TURNS
 
 
 def window_seconds(args):
+    if args.packet_attribution:
+        return PACKET_TURN_SECONDS
     return ATTRIBUTION_TURN_SECONDS if args.cpu_attribution else TURN_SECONDS
 
 
@@ -182,6 +188,50 @@ class Console:
         return tuple(int(value) for value in match.groups())
 
 
+class PacketSampler:
+    def __init__(self, bot, log, bot_mask, cpu_sampler):
+        self.bot = bot
+        self.log = log
+        self.bot_mask = bot_mask
+        self.cpu_sampler = cpu_sampler
+
+    def snapshot(self):
+        started = time.perf_counter_ns()
+        self.bot.stdin.write(b"snapshot\n")
+        self.bot.stdin.flush()
+        pending = ""
+        while time.perf_counter_ns() - started < 2_000_000_000 and self.bot.poll() is None:
+            line = self.log.readline()
+            if not line:
+                time.sleep(.001)
+                continue
+            pending += line
+            if not pending.endswith("\n"):
+                continue
+            if match := PACKET_SNAPSHOT.fullmatch(pending.rstrip()):
+                ended = time.perf_counter_ns()
+                measuring, ready, packets, wire_bytes, entity_packets = map(int, match.groups())
+                if measuring != 1 or ready != 20:
+                    raise RuntimeError(f"Packet window has {ready} ready bots, measuring={measuring}")
+                return {"ns": (started + ended) // 2, "read_ms": (ended - started) / 1e6,
+                        "packets": packets, "wire_bytes": wire_bytes, "entity_packets": entity_packets,
+                        "cpu": self.cpu_sampler.process_cpu_s(self.bot), "lane": cpu_counters(self.bot_mask)}
+            pending = ""
+        raise RuntimeError(f"Missing packet snapshot in {self.log.name}")
+
+    @staticmethod
+    def delta(start, finish, os_start, os_finish):
+        span = (finish["ns"] - start["ns"]) / 1e9
+        counters = {key: finish[key] - start[key] for key in ("packets", "wire_bytes", "entity_packets")}
+        if span <= 0 or counters["packets"] <= 0 or counters["wire_bytes"] < counters["packets"]:
+            raise RuntimeError(f"Invalid packet counters: {counters}")
+        total, busy = (finish["lane"][i] - start["lane"][i] for i in range(2))
+        return counters | {"packet_elapsed_s": span, "packet_read_ms": max(start["read_ms"], finish["read_ms"]),
+                           "packet_boundary_skew_ms": max(abs(start["ns"] - os_start["monotonic"]),
+                                                          abs(finish["ns"] - os_finish["monotonic"])) / 1e6,
+                           "bot_background_pct": 100 * max(0, busy - finish["cpu"] + start["cpu"]) / total}
+
+
 def place(console, phase):
     if phase == "SPREAD":
         for index in range(20):
@@ -197,12 +247,13 @@ def teleport_all(console, coord):
     console.wait(r"Teleported 20 entities to")
 
 
-def measure(console, phase, seconds, server_mask, mode, cpu_sampler=None):
+def measure(console, phase, seconds, server_mask, mode, cpu_sampler=None, packet_sampler=None):
     start_ns, start_cpu, window, start_main, start_gc_count, start_gc_ms = console.phase(
         phase, mode if console.interleaved else None
     )
     start_bg = cpu_counters(server_mask)
     os_start = cpu_sampler.snapshot() if cpu_sampler else None
+    packet_start = packet_sampler.snapshot() if packet_sampler else None
     started = time.monotonic()
     if phase == "TELEPORT":
         for wave in range(seconds // 2):
@@ -223,15 +274,17 @@ def measure(console, phase, seconds, server_mask, mode, cpu_sampler=None):
             console.wait(confirmation)
     time.sleep(max(0, started + seconds - time.monotonic()))
     end_ns, end_cpu, _, end_main, end_gc_count, end_gc_ms = console.phase("IDLE")
-    if cpu_sampler:
-        cpu_sampler.record(window, os_start, cpu_sampler.snapshot())
+    os_finish = cpu_sampler.snapshot() if cpu_sampler else None
+    packets = packet_sampler.delta(packet_start, packet_sampler.snapshot(), os_start, os_finish) if packet_sampler else {}
     finish_bg = cpu_counters(server_mask)
+    if cpu_sampler:
+        cpu_sampler.record(window, os_start, os_finish)
     cpu = (end_cpu - start_cpu) / 1e9
     total, busy = (finish_bg[i] - start_bg[i] for i in range(2))
     return {"phase": phase, "backend": mode, "window": window, "elapsed_s": (end_ns - start_ns) / 1e9, "cpu_s": cpu,
             "main_cpu_s": (end_main - start_main) / 1e9 if start_main >= 0 and end_main >= 0 else None,
             "gc_count": end_gc_count - start_gc_count, "gc_ms": end_gc_ms - start_gc_ms,
-            "background_pct": 100 * max(0, busy - cpu) / total}
+            "background_pct": 100 * max(0, busy - cpu) / total} | packets
 
 
 def summarize_rows(run, windows, minimum_samples, keep_short=False):
@@ -262,7 +315,7 @@ def summarize_rows(run, windows, minimum_samples, keep_short=False):
             metrics[field.replace("_ns", "_us")] = statistics.median(int(row[field]) for row in samples) / 1000
 
 
-def interleave(console, args, checkpoint, cpu_sampler=None):
+def interleave(console, args, checkpoint, cpu_sampler=None, packet_sampler=None):
     windows = []
     turns = rotation(args)
     for phase in PHASES:
@@ -280,12 +333,35 @@ def interleave(console, args, checkpoint, cpu_sampler=None):
                 if paired_modes(args):
                     console.phase("IDLE", mode)
                     time.sleep(DELTA_SETTLE_SECONDS)
-                windows.append(measure(console, phase, window_seconds(args), args.server_mask, mode, cpu_sampler) | {"turn": turn})
+                windows.append(measure(console, phase, window_seconds(args), args.server_mask, mode,
+                                       cpu_sampler, packet_sampler) | {"turn": turn})
         if cpu_sampler:
             cpu_sampler.discover_names()
             cpu_sampler.finish(windows)
         checkpoint.write_text(json.dumps(windows, indent=2), encoding="utf-8")
     return windows
+
+
+def packet_metrics(windows, netty_cpu_rate):
+    count = sum(w["packets"] for w in windows)
+    span = sum(w["packet_elapsed_s"] for w in windows)
+    packet_rate = count / span
+    bot_background = [w["bot_background_pct"] for w in windows]
+    return {"packets": count, "packets_per_s": packet_rate,
+            "wire_bytes_per_packet": sum(w["wire_bytes"] for w in windows) / count,
+            "entity_packet_pct": 100 * sum(w["entity_packets"] for w in windows) / count,
+            "netty_cpu_us_per_packet": 1e6 * netty_cpu_rate / packet_rate,
+            "max_packet_read_ms": max(w["packet_read_ms"] for w in windows),
+            "max_packet_boundary_skew_ms": max(w["packet_boundary_skew_ms"] for w in windows),
+            "bot_background_pct_range": [min(bot_background), max(bot_background)]}
+
+
+def packet_cpu_effects(baseline, candidate):
+    rates = [report["packets_per_s"] for report in (baseline, candidate)]
+    costs = [report["netty_cpu_us_per_packet"] for report in (baseline, candidate)]
+    # Attribute the interaction equally to both factors so the two effects sum to the observed change.
+    return {"volume_cpu_s_per_20s": 20e-6 * (rates[1] - rates[0]) * statistics.mean(costs),
+            "cost_cpu_s_per_20s": 20e-6 * (costs[1] - costs[0]) * statistics.mean(rates)}
 
 
 def interleaved_summary(run, windows, modes):
@@ -295,12 +371,24 @@ def interleaved_summary(run, windows, modes):
     for phase in PHASES:
         phase_windows = [window for window in windows if window["phase"] == phase]
         by_turn = defaultdict(list)
+        has_packets = "packets" in phase_windows[0]
         short_turns = {window["turn"] for window in phase_windows if "tick_p99_ms" not in window}
+        skewed_turns = {
+            w["turn"] for w in phase_windows
+            if has_packets and w["packet_boundary_skew_ms"] + w["packet_read_ms"] / 2 > PACKET_BOUNDARY_LIMIT_MS
+        }
+        excluded_turns = short_turns | skewed_turns
         for window in phase_windows:
-            if window["turn"] not in short_turns:
-                by_turn[window["turn"]].append(window["background_pct"])
-        matched = [turn for turn, load in by_turn.items() if max(load) - min(load) <= BACKGROUND_MATCH_PP]
+            if window["turn"] not in excluded_turns:
+                by_turn[window["turn"]].append(window)
+        load_keys = ("background_pct", "bot_background_pct") if has_packets else ("background_pct",)
+        matched = []
+        for turn, pair in by_turn.items():
+            if all(max(w[key] for w in pair) - min(w[key] for w in pair) <= BACKGROUND_MATCH_PP for key in load_keys):
+                matched.append(turn)
         report[phase] = {"short_turns": sorted(short_turns), "matched_turns": matched, "all": {}, "matched": {}}
+        if has_packets:
+            report[phase]["packet_skew_turns"] = sorted(skewed_turns)
         for label, turns in (("all", by_turn), ("matched", matched)):
             if not turns:
                 continue
@@ -336,7 +424,13 @@ def interleaved_summary(run, windows, modes):
                     }
                     metrics["os_elapsed_s"] = os_elapsed
                     metrics["max_thread_read_ms"] = max(w["thread_read_ms"] for w in selected)
+                if has_packets:
+                    metrics.update(packet_metrics(selected, metrics["thread_cpu_s_per_20s"]["netty"] / 20))
                 report[phase][label][mode] = metrics
+            if has_packets:
+                report[phase].setdefault("netty_cpu_effects", {})[label] = packet_cpu_effects(
+                    *(report[phase][label][mode] for mode in modes)
+                )
     return report
 
 
@@ -350,7 +444,7 @@ def stop(process, console):
             process.wait(timeout=10)
 
 
-def run(args, probe, backend, name):
+def run(args, probe, backend, name, verify_dirty=False):
     game_port = free_port()
     work = args.output / name
     copy_fixture(args.seed, work, probe, game_port)
@@ -363,7 +457,8 @@ def run(args, probe, backend, name):
             f"-Dspica.shadow.backend={backend}", f"-Dspica.shadow.library={args.native}"]
     if args.movement or args.hook_cost:
         java.append(args.movement_agent)
-        java.append("-Dspica.shadow.verifyDirect=true" if args.hook_cost else "-Dspica.shadow.verifyDirty=true")
+        checks_dirty = verify_dirty or not args.hook_cost
+        java.append("-Dspica.shadow.verifyDirty=true" if checks_dirty else "-Dspica.shadow.verifyDirect=true")
     if interleaved and args.hook_cost:
         java.append("-Dpaper.playerconnection.keepalive=120")
     if verify:
@@ -388,16 +483,24 @@ def run(args, probe, backend, name):
             if interleaved:
                 turns = rotation(args)
                 settle = DELTA_SETTLE_SECONDS if paired_modes(args) else 0
-                bot_duration = 3 * (len(turns) * len(turns[0]) * (window_seconds(args) + settle) + 6 * len(turns[0])) + 22
+                scenario_duration = len(turns) * len(turns[0]) * (window_seconds(args) + settle) + 6 * len(turns[0])
+                bot_duration = len(PHASES) * scenario_duration + 22
                 if args.cpu_attribution:
                     cpu_sampler = JvmCpuSampler(server, args.java)
                     bot_duration += 12
-            with (work / "bots.json").open("w", encoding="utf-8") as out, (work / "bots.log").open("w", encoding="utf-8") as err:
+            packet_mode = interleaved and args.packet_attribution
+            if packet_mode:
+                bot_duration += 180  # Safety deadline; the runner stops the bots after the last sample.
+            bot_log = work / "bots.log"
+            with ((work / "bots.json").open("w", encoding="utf-8") as out, bot_log.open("w", encoding="utf-8") as err,
+                  bot_log.open(encoding="utf-8", errors="replace") as snapshots):
                 bot = subprocess.Popen([str(args.bots), "--host", "127.0.0.1", "--port", str(game_port), "--bots", "20",
                                         "--prefix", "ShadowBot", "--warmup", "2", "--duration", str(bot_duration),
-                                        "--stagger-ms", "60", "--min-ready-pct", "100", "--json"], cwd=work, stdout=out,
-                                       stderr=err, creationflags=process_flags)
+                                        "--stagger-ms", "60", "--min-ready-pct", "100", "--json"]
+                                       + (["--snapshot-stdin"] if packet_mode else []), cwd=work, stdout=out,
+                                       stdin=subprocess.PIPE if packet_mode else None, stderr=err, creationflags=process_flags)
                 pin(bot, args.bot_mask)
+                packet_sampler = PacketSampler(bot, snapshots, args.bot_mask, cpu_sampler) if packet_mode else None
                 outstanding = {f"{index:03d}" for index in range(1, 21)}
                 join_deadline = time.monotonic() + 60
                 while outstanding:
@@ -407,7 +510,7 @@ def run(args, probe, backend, name):
                 console.send("minecraft:gamemode spectator @a")
                 console.wait(r"Set ShadowBot\d{3}'s game mode to Spectator Mode")
                 if interleaved:
-                    windows = interleave(console, args, work / "windows.json", cpu_sampler)
+                    windows = interleave(console, args, work / "windows.json", cpu_sampler, packet_sampler)
                     if cpu_sampler:
                         (work / "thread-catalogue.json").write_text(json.dumps(cpu_sampler.catalogue(), indent=2), encoding="utf-8")
                 else:
@@ -420,6 +523,9 @@ def run(args, probe, backend, name):
                 console.require_bots = False
                 console.send("chunkshadow dump")
                 console.wait(r"SHADOW_WRITTEN \d+")
+                if packet_mode:
+                    bot.stdin.write(b"finish\n")
+                    bot.stdin.close()
                 if bot.wait(timeout=45) != 0:
                     raise RuntimeError(f"Bot run failed in {work}")
         finally:
@@ -470,7 +576,9 @@ def main():
     comparison.add_argument("--movement", action="store_true", help="Pair incremental polling with the pinned test movement hook")
     comparison.add_argument("--hook-cost", action="store_true", help="Pair the original movement listener with direct slot lookup")
     comparison.add_argument("--cpu-attribution", action="store_true", help="Repeat the hook A/B with long windows and OS thread CPU")
+    comparison.add_argument("--packet-attribution", action="store_true", help="Attribute Netty CPU to packet volume and cost")
     args = parser.parse_args()
+    args.cpu_attribution = args.cpu_attribution or args.packet_attribution
     args.hook_cost = args.hook_cost or args.cpu_attribution
     if os.name != "nt" or not args.server_mask or not args.bot_mask or args.server_mask & args.bot_mask or args.seconds < 20:
         parser.error("Requires Windows, disjoint nonempty masks and at least twenty measurement seconds")
@@ -482,6 +590,8 @@ def main():
     raw = {"server_mask": args.server_mask, "bot_mask": args.bot_mask, "fixture": stable_fixture(args.seed), "rounds": []}
     if not args.skip_verify:
         raw["verify"] = run(args, probe, "verify", "verify")
+        if args.packet_attribution:
+            raw["verify_dirty"] = run(args, probe, "verify", "verify-dirty", verify_dirty=True)
         (args.output / "results.json").write_text(json.dumps(raw, indent=2), encoding="utf-8")
     if args.interleave or paired_modes(args):
         raw["interleaved"] = run(args, probe, "interleaved", "interleaved")

@@ -169,3 +169,33 @@ JVM GC süre sayacı, eşleşen pencerelerde yoğun farm için 42 → 95 ms, da�
 | Teleport | 16,14 → 16,00 (−%0,8) | 0,12 → 1,34 | 7,05 → 6,84 | 47,56 → 41,03 (−%13,7) |
 
 Yoğun farmda toplam CPU ve p99 düşüşünün yönü iki tabloda da aynı. Dağınık senaryoda CPU ve p99 farkının, teleportta da CPU farkının yönü pencere seçimiyle değişiyor. Teleport p99’u iki tabloda da düşük, ancak tek eşleşen çiftle etkinin büyüklüğü belirsiz. İş parçacığı dağılımı bu uzun koşudaki farkın bileşenlerini gösteriyor. Önceki koşudaki 246 ms GC kaydı geçmişe dönük olarak bu gruplara ayrıştırılamıyor.
+
+## Netty CPU ve paket hacmi
+
+`--packet-attribution --rounds 0` seçeneği `b7eab50`’deki aynı `DIRTY` ve `DIRECT` yollarını tek Purpur JVM’sinde karşılaştırır. Senaryo başına on çift alınır. Her çiftin iki kolu da sekiz saniye çalışır, A/B ve B/A sırası dönüşümlüdür. JVM `0x3f`, 20 bot `0xc0` maskesine sabitlenir. Eşleştirme için her iki işlemci kümesinde de ilgili benchmark sürecinin CPU’su çıkarılır. Bir çift, iki kümede de kalan arka plan yükü farkı en çok 5 yüzde puansa eşleşir.
+
+Koşucu pencere sınırlarında bot istemine `snapshot` yazar. Bot, mevcut birikimli Minecraft Play paket, ağ baytı ve entity paket sayaçlarını döndürür. Sayaçlar, hazır botların sunucudan alıp ayrıştırdığı Minecraft çerçevelerini ve çerçeve başlıkları dahil ağ baytlarını kapsar. Bu ölçümde iki kola da aynı bot derlemesi yük verir. Paket başına Netty CPU, ölçülen Netty I/O CPU/s değerinin paket/s değerine bölümüdür. Bu ortalamaya paket türü, boyutu, gruplama ve iş parçacığı zamanlaması da yansıyabilir.
+
+Paket isteği iş parçacığı okumasının hemen ardından gönderilir. Arka plan sayaçları bu iki okumanın dışında alınır. Paket okuma aralığının iki ucuna olan uzaklığın üst sınırı 100 ms’yi aşarsa iki kol da özetten çıkarılır. Bu eşik sekiz saniyelik pencerenin %1,25’idir. Ham sayaçlar her pencere için korunur. İlk denemede botların sabit ölçüm süresi son teleport çifti bitmeden doldu. Tam koşuda koşucu son tick kaydı yazıldıktan sonra `finish` komutuyla bot ölçümünü kapatır.
+
+Netty CPU/s, paket/s ile ortalama CPU/paket çarpımı olarak ayrıştırılır. Hacim etkisi paket hızındaki farkın iki kolun ortalama paket maliyetiyle çarpımıdır. Birim maliyet etkisi, paket maliyetindeki farkın iki kolun ortalama paket hızıyla çarpımıdır. İkisi bir araya geldiğinde gözlenen Netty CPU farkını verir. Bu hesap trafik hacmi ile normalize edilmiş maliyeti ayırır. Maliyet değişiminin hangi Netty fonksiyonundan kaynaklandığını belirlemek için işlev seviyesinde ayrı bir profil gerekir.
+
+Üç koşuda kullanılan 42 dünya dosyasının SHA-256 özeti `b7eab50` ölçümüyle aynıydı. Ayrı `-Xcheck:jni` doğrulamalarında tam tarama ile `DIRTY` 397, `DIRECT` 521 canlı tick boyunca aynı aday kümelerini üretti. Her doğrulama API bildirimi gelmeyen aynı blok içi X/Z değişimini ve yaşam döngüsü deneğini içerdi. Üretim JAR’ı benchmark kancası ve denek sınıfları açısından kontrol edildi.
+
+Tam A/B’de 20 botun tümü hazır kaldı, kopma olmadı ve 900 keep-alive yanıtı alındı. 60 pencere boyunca 9.893 tick kaydedildi. Tüm pencereler zamanlama eşiğini geçti. Sayaçlar arasındaki uzaklığın en yüksek üst sınırı 74,96 ms oldu. Arka plan yükü eşleşen 16 çiftin 5.300 tick’i aşağıdaki tablolara girdi. Eşleşen çiftlerde arka plan yükü farkı JVM kümesinde en çok 3,00, bot kümesinde 4,87 yüzde puandı.
+
+Hücreler `DIRTY` → `DIRECT` sırasındadır. Netty CPU ve iki etki 20 saniye duvar süresine ölçeklenmiş CPU saniyeleridir.
+
+| Senaryo | Eşleşen çift | Paket/sn | Netty CPU | Netty µs/paket | Ağ baytı/paket |
+|---|---:|---:|---:|---:|---:|
+| Yoğun farm | 8/10 | 317.289 → 312.639 (−%1,47) | 33,76 → 33,59 (−%0,50) | 5,320 → 5,372 (+%0,98) | 11,400 → 11,416 |
+| Dağınık | 6/10 | 234.326 → 234.959 (+%0,27) | 27,64 → 27,03 (−%2,21) | 5,898 → 5,753 (−%2,47) | 10,787 → 10,801 |
+| Teleport | 2/10 | 37.226 → 37.159 (−%0,18) | 8,64 → 7,75 (−%10,30) | 11,604 → 10,428 (−%10,14) | 24,420 → 24,547 |
+
+| Senaryo | Paket hacmi etkisi | Birim maliyet etkisi | Netty CPU farkı | JVM CPU-s / 20 sn | Tick p99 (ms) |
+|---|---:|---:|---:|---:|---:|
+| Yoğun farm | −0,497 | +0,328 | −0,169 | 46,27 → 47,43 (+%2,51) | 55,59 → 61,68 (+%10,95) |
+| Dağınık | +0,074 | −0,685 | −0,611 | 43,73 → 42,88 (−%1,96) | 94,25 → 100,59 (+%6,73) |
+| Teleport | −0,015 | −0,875 | −0,890 | 25,12 → 19,65 (−%21,76) | 77,59 → 72,93 (−%6,01) |
+
+Yoğun farmda hacim azaldı, paket başına CPU arttı. Kalan %0,50 CPU düşüşü tüm pencereler alındığında %0,51 artışa döndü. Önceki %7,9 Netty CPU düşüşü bu koşuda tekrarlanmadı. Dağınık senaryoda altı çiftin dördünde Netty CPU azaldı. Birleşik düşüşün kaynağı paket başına CPU’ydu ve tüm pencerelerde Netty CPU %2,23 düştü. Teleportta eşleşen iki çiftte de paket başına CPU aşağıdaydı. Tüm pencereler alındığında Netty CPU düşüşü %5,24 oldu. İki eşleşen çift, teleport etkisinin büyüklüğünü genellemek için sınırlı. Paketlerin ortalama ağ boyutu üç senaryoda da %0,53’ten az değişti.
