@@ -5,6 +5,7 @@ import com.destroystokyo.paper.event.entity.EntityRemoveFromWorldEvent;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
+import java.util.Arrays;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -19,8 +20,11 @@ import org.bukkit.event.world.WorldUnloadEvent;
 
 /** Maintains the shadow roster from world lifecycle events and shares only changed slots. */
 final class ChunkTrackingIncremental implements Listener, AutoCloseable {
+    enum Motion { POLL, IMMEDIATE, DIRECT }
+
     private static final int MAX_MOBS = ChunkTrackingQuery.MAX_MOBS;
     private static final int DELTA_WORDS = 3;
+    private static final int DENSE_ID_LIMIT = 16_384;
 
     private final Map<World, WorldIndex> worlds = new IdentityHashMap<>();
     private final ByteBuffer deltaBytes = ChunkTrackingQuery.direct(MAX_MOBS * DELTA_WORDS * Long.BYTES);
@@ -28,19 +32,25 @@ final class ChunkTrackingIncremental implements Listener, AutoCloseable {
     private final LongBuffer deltas = deltaBytes.asLongBuffer();
     private final LongBuffer pairs = pairBytes.asLongBuffer();
     private final boolean dirtyOnly;
+    private final Motion motion;
     private final Int2ObjectOpenHashMap<Binding> dirtyBindings;
     private final ConcurrentLinkedQueue<Integer> offThread;
+    private final Binding[] denseBindings;
     private final Thread owner = Thread.currentThread();
     private long eventNanos;
+    private int mainNotifications;
+    private int lookups;
 
-    ChunkTrackingIncremental(boolean dirtyOnly) {
-        this.dirtyOnly = dirtyOnly;
+    ChunkTrackingIncremental(Motion motion) {
+        this.motion = motion;
+        this.dirtyOnly = motion != Motion.POLL;
         this.dirtyBindings = dirtyOnly ? new Int2ObjectOpenHashMap<>() : null;
         this.offThread = dirtyOnly ? new ConcurrentLinkedQueue<>() : null;
+        this.denseBindings = motion == Motion.DIRECT ? new Binding[DENSE_ID_LIMIT] : null;
     }
 
     void attachMovementFeed() {
-        ChunkTrackingPositionFeed.attach(this::mark);
+        ChunkTrackingPositionFeed.attach(motion == Motion.DIRECT ? this::markDirect : this::mark);
     }
 
     WorldIndex world(World world) {
@@ -112,7 +122,8 @@ final class ChunkTrackingIncremental implements Listener, AutoCloseable {
             world.queued[slot] = false;
             Mob mob = world.mobs[slot];
             boolean published = world.published[slot];
-            if (mob == null || !mob.isValid() || mob.isDead()) {
+            // The pinned CraftEntity.isValid() already checks isAlive().
+            if (mob == null || !mob.isValid() || (motion != Motion.DIRECT && mob.isDead())) {
                 if (published) {
                     write(world.upserts + world.removals, ~((long) slot), 0, 0);
                     world.removals++;
@@ -139,7 +150,13 @@ final class ChunkTrackingIncremental implements Listener, AutoCloseable {
     }
 
     private void bind(WorldIndex world, Mob mob, int slot) {
-        dirtyBindings.put(mob.getEntityId(), new Binding(world, slot));
+        int id = mob.getEntityId();
+        Binding binding = new Binding(world, slot);
+        if (denseId(id)) {
+            denseBindings[id] = binding;
+        } else {
+            dirtyBindings.put(id, binding);
+        }
         world.enqueue(slot);
     }
 
@@ -149,14 +166,46 @@ final class ChunkTrackingIncremental implements Listener, AutoCloseable {
             return;
         }
         long start = System.nanoTime();
+        mainNotifications++;
         enqueue(id);
         eventNanos += System.nanoTime() - start;
     }
 
+    private void markDirect(int id) {
+        if (Thread.currentThread() == owner) {
+            mainNotifications++;
+            enqueue(id);
+        } else {
+            offThread.add(id);
+        }
+    }
+
+    private boolean denseId(int id) {
+        return denseBindings != null && id >= 0 && id < denseBindings.length;
+    }
+
     private void enqueue(int id) {
-        Binding binding = dirtyBindings.get(id);
+        Binding binding;
+        if (denseId(id)) {
+            binding = denseBindings[id];
+        } else {
+            lookups++;
+            binding = dirtyBindings.get(id);
+        }
         if (binding != null) {
             binding.world.enqueue(binding.slot);
+        }
+    }
+
+    private void unbind(WorldIndex world, int id, int slot) {
+        boolean dense = denseId(id);
+        Binding binding = dense ? denseBindings[id] : dirtyBindings.get(id);
+        if (binding != null && binding.world == world && binding.slot == slot) {
+            if (dense) {
+                denseBindings[id] = null;
+            } else {
+                dirtyBindings.remove(id);
+            }
         }
     }
 
@@ -184,6 +233,18 @@ final class ChunkTrackingIncremental implements Listener, AutoCloseable {
         return elapsed;
     }
 
+    int takeNotifications() {
+        int count = mainNotifications;
+        mainNotifications = 0;
+        return count;
+    }
+
+    int takeLookups() {
+        int count = lookups;
+        lookups = 0;
+        return count;
+    }
+
     @EventHandler(priority = EventPriority.MONITOR)
     public void added(EntityAddToWorldEvent event) {
         if (event.getEntity() instanceof Mob mob) {
@@ -207,11 +268,7 @@ final class ChunkTrackingIncremental implements Listener, AutoCloseable {
             if (world != null) {
                 int slot = world.remove(mob);
                 if (dirtyOnly && slot >= 0) {
-                    int id = mob.getEntityId();
-                    Binding binding = dirtyBindings.get(id);
-                    if (binding != null && binding.world == world && binding.slot == slot) {
-                        dirtyBindings.remove(id);
-                    }
+                    unbind(world, mob.getEntityId(), slot);
                     world.enqueue(slot);
                 }
             }
@@ -225,6 +282,14 @@ final class ChunkTrackingIncremental implements Listener, AutoCloseable {
         if (world != null) {
             if (dirtyOnly) {
                 dirtyBindings.values().removeIf(binding -> binding.world == world);
+                if (denseBindings != null) {
+                    for (int slot = 0; slot < world.slotCount; slot++) {
+                        Mob mob = world.mobs[slot];
+                        if (mob != null && denseId(mob.getEntityId())) {
+                            unbind(world, mob.getEntityId(), slot);
+                        }
+                    }
+                }
             }
             world.close();
         }
@@ -237,10 +302,15 @@ final class ChunkTrackingIncremental implements Listener, AutoCloseable {
             dirtyBindings.clear();
             offThread.clear();
         }
+        if (denseBindings != null) {
+            Arrays.fill(denseBindings, null);
+        }
         HandlerList.unregisterAll(this);
         worlds.values().forEach(WorldIndex::close);
         worlds.clear();
         eventNanos = 0;
+        mainNotifications = 0;
+        lookups = 0;
     }
 
     private record Binding(WorldIndex world, int slot) { }

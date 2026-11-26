@@ -113,3 +113,29 @@ A/B aynı test JVM’sinde `5a5966e` sürümünün konum tarama döngüsü ile b
 | Teleport | 3/8 | 1.030 → 349 (−%66,1) | 337,4 → 247,4 (−%26,7) | 12,30 → 13,19 (+%7,2) | 38,33 → 45,24 (+%18,0) |
 
 Toplam aday süresi tick başına 0,052–0,129 ms azaldı. Bütün pencerelerde de aday süresi %14,4–30,1 daha düşüktü. İki yol aynı değişiklikleri toplu gönderdiği için JNI’ye giren satır sayısı benzer kaldı. Kazanç Java’nın konum okumalarını sınırlamasından geldi. JVM CPU ve tick p99 iki senaryoda yükseldi. Bu ölçüm, aday hesabındaki kazancı gösterir ve sunucu genelinde tutarlı bir CPU veya p99 düşüşü göstermedi.
+
+## Hareket bildirimlerinin sıcak yolu
+
+`9449861` ham tick’lerinde dağınık senaryonun p99’u 31,3151 → 34,1017 ms iken bu iki tick’te ölçülen takip işi 0,4314 → 0,4319 ms idi. Teleportta karşılık gelen sayılar 38,3273 → 45,2420 ms ve 0,3683 → 0,3819 ms idi. Ölçülen takip işi çıkarıldığında p99 farkları sırasıyla 2,786 ve 6,901 ms kaldı. Teleportta eşleşen üç çiftin ikisinde JVM CPU düştü. Bir çiftteki %35,8 artış birleşik sonucun yönünü değiştirdi. Bu kayıtlar JVM’nin hangi alt sisteminin değişime yol açtığını belirlemeye yetmiyor.
+
+Eski hareket tüketicisi her bildirimde bir hash araması ve iki `nanoTime()` çağrısı yapıyordu. İlk denemede hash aramasından önce ikinci bir kuyrukla tekilleştirme sınandı. Bu dünyada bildirim sayısı ve kuyruktaki mob sayısı pratikte aynı kaldı. Eşleşmiş dağınık pencerelerde ikinci kuyrukla JVM CPU %3,0 ve p99 %4,0 yükseldi. Bu yol son değişikliğe alınmadı.
+
+Son yol, tamsayı entity kimliğinden mob yuvasına doğrudan dizinle erişiyor ve sıra dışı kimliklerde hash tablosunu kullanıyor. Yuva kuyruğu aynı mob için yinelenen bildirimleri topluyor. Bildirim başına saat okumaları kaldırıldı. Sabitlenen Purpur sürümünde `CraftEntity.isValid()` zaten `isAlive()` kontrolünü yaptığı için doğrudan yol ikinci `isDead()` çağrısını da kaldırıyor. İki yol aynı agent bayt kodunu, konum kaynağını, Rust indeksini ve JNI sözleşmesini kullanıyor.
+
+`--hook-cost --rounds 0` ile `9449861`in bildirim yolu ve doğrudan yuva erişimi aynı JVM’de karşılaştırılır. Her senaryoda A/B ve B/A sırası dörder kez çalışır, pencere dört saniye sürer. Aday süreleri Java’nın tick başındaki işi ve JNI’yi kapsar. Bu ortak sayaç, tick içinde ayrı yerden çalışan bildirim maliyetini iki kolda da dışarıda bırakır. JVM ve ana iş parçacığı CPU ölçümleri bildirimleri de kapsar. GC toplam sayısı ve süresi ayrıca kaydedilir.
+
+İlk tekrar giriş sırası yarışını yakaladı. `ShadowBot020`, üç bot daha bağlanmadan dünyaya girdi ve ilk yerleşim yalnızca 17 botu taşıdı. Koşucu artık 20 farklı giriş kaydını bekliyor ve toplu teleportların 20 oyuncuya uygulandığını doğruluyor. `9449861`in yayımlanan A/B kaydında ilk yerleşim zaten 20 botla yapılmıştı.
+
+Ayrı JFR teşhis koşusunda ilk bot zaman aşımından önce 24 GC duraklaması kaydedildi. En uzunu 348,8 ms sürdü. Bu aralıkta iş parçacığı yükü örneklerinde Netty trafiği ve JIT derleyicileri de belirgindi. JFR açık koşu botlar koptuğu için performans tablosuna alınmadı. Son A/B’de profil kapalı, test JVM’sinin keep-alive zaman aşımı 120 saniye ve farklı çekirdeklere sabitlenen JVM ile bot sürecinin öncelikleri normalin üstündeydi. İki kol aynı ayarları kullandı.
+
+42 dünya dosyasının SHA-256 özeti `9449861` ölçümüyle aynıydı. `-Xcheck:jni` ile 503 canlı tick’te aday kümeleri birebir eşleşti. A/B’de 20 botun tamamı hazır kaldı, erken kopma olmadı ve 460 keep-alive yanıtı alındı. 48 pencere ve 3.867 tick içinden arka plan yükü eşleşen 10 çiftin 1.615 tick’i tabloya girdi. Her hücre önce `9449861`, ardından doğrudan yuva yoludur.
+
+| Senaryo | Eşleşen çift | Hash araması/tick | Tick başı JNI dahil (µs) | JVM CPU-s / 20 sn | Ana iş parçacığı CPU-s / 20 sn | Tick p99 (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| Yoğun farm | 4/8 | 305 → 0 | 323,75 → 312,30 (−%3,5) | 64,71 → 56,02 (−%13,4) | 13,77 → 12,03 (−%12,6) | 64,66 → 59,81 (−%7,5) |
+| Dağınık | 2/8 | 421 → 0 | 337,60 → 333,15 (−%1,3) | 41,81 → 42,52 (+%1,7) | 11,79 → 12,83 (+%8,8) | 51,69 → 47,37 (−%8,4) |
+| Teleport | 4/8 | 342 → 0 | 230,00 → 213,20 (−%7,3) | 18,74 → 19,32 (+%3,1) | 8,14 → 8,37 (+%2,7) | 64,37 → 60,40 (−%6,2) |
+
+Eski kolda Java bildirim işleyicisinin ölçülen medyan süresi yoğun, dağınık ve teleport pencerelerinde sırasıyla 112,4, 135,6 ve 81,3 µs/tick idi. Buna per-bildirim zamanlaması eşlik ediyordu. Yeni kolda saat okumaları kaldırıldığı için bu sayaç yeni işleyicinin süresini ölçmüyor. Hash araması ve tick başındaki JNI dahil süre her senaryoda düştü. Eşleşen pencerelerde p99 gerilerken dağınık ve teleport JVM CPU’su yükseldi.
+
+Teleportun sekizinci çiftinde yeni kol 246 ms GC süresi kaydetti. JVM CPU 12,25 → 25,76 CPU-s/20 sn ve ana iş parçacığı CPU’su 6,01 → 7,25 CPU-s/20 sn oldu. Bu CPU farkının yaklaşık %91’i ana iş parçacığı dışındaydı. Aynı çift iki taraftan çıkarıldığında kalan teleport pencerelerinde JVM CPU 20,90 → 17,17 (−%17,9) oldu. Bu duyarlılık kontrolüdür. Ana tabloda sekizinci çift de yer alır. Dağınık senaryoda yalnız iki çift eşleşti ve CPU farkının yönü çiftler arasında değişti.

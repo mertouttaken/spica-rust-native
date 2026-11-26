@@ -25,6 +25,7 @@ ORDERS = (("full", "java", "rust"), ("java", "rust", "full"), ("rust", "full", "
 TURNS = ORDERS + tuple(tuple(reversed(order)) for order in ORDERS)
 DELTA_MODES = ("rust", "incremental")
 MOVEMENT_MODES = ("incremental", "dirty")
+HOOK_COST_MODES = ("dirty", "direct")
 DELTA_SETTLE_SECONDS = 2
 TURN_SECONDS = 4
 BACKGROUND_MATCH_PP = 5.0
@@ -82,7 +83,7 @@ main: net.spicanetwork.rustnative.benchmark.ChunkTrackingShadow
 api-version: '1.21'
 commands:
   chunkshadow:
-    usage: /chunkshadow <idle|dense|spread|teleport|dump> [full|java|rust|incremental|dirty]
+    usage: /chunkshadow <idle|dense|spread|teleport|dump> [full|java|rust|incremental|dirty|direct]
 """)
 
 
@@ -110,6 +111,8 @@ def make_movement_agent(args):
 
 
 def paired_modes(args):
+    if args.hook_cost:
+        return HOOK_COST_MODES
     if args.movement:
         return MOVEMENT_MODES
     if args.incremental:
@@ -145,6 +148,7 @@ class Console:
         self.process = process
         self.log = log
         self.interleaved = interleaved
+        self.require_bots = False
 
     def send(self, command):
         self.process.stdin.write(command + "\n")
@@ -156,6 +160,8 @@ class Console:
             line = self.log.readline()
             if "SHADOW_FAILED" in line:
                 raise RuntimeError(line.strip())
+            if self.require_bots and re.search(r"ShadowBot\d{3} lost connection:", line):
+                raise RuntimeError(line.strip())
             if match := re.search(pattern, line):
                 return match
             if not line:
@@ -165,7 +171,7 @@ class Console:
     def phase(self, name, backend=None):
         command = f"chunkshadow {name.lower()}"
         self.send(f"{command} {backend}" if backend else command)
-        match = self.wait(rf"SHADOW_PHASE {name} (-?\d+) (\d+) (\d+)")
+        match = self.wait(rf"SHADOW_PHASE {name} (-?\d+) (\d+) (\d+) (-?\d+) (\d+) (\d+)")
         return tuple(int(value) for value in match.groups())
 
 
@@ -174,19 +180,27 @@ def place(console, phase):
         for index in range(20):
             x, z = POSITIONS[index // 4]
             console.send(f"minecraft:tp ShadowBot{index + 1:03d} {x} -54 {z}")
+        console.wait(r"Teleported ShadowBot020 to")
     else:
-        console.send("minecraft:tp @a 0 -54 0")
+        teleport_all(console, 0)
+
+
+def teleport_all(console, coord):
+    console.send(f"minecraft:tp @a {coord} -54 {coord}")
+    console.wait(r"Teleported 20 entities to")
 
 
 def measure(console, phase, seconds, server_mask, mode):
-    start_ns, start_cpu, window = console.phase(phase, mode if console.interleaved else None)
+    start_ns, start_cpu, window, start_main, start_gc_count, start_gc_ms = console.phase(
+        phase, mode if console.interleaved else None
+    )
     start_bg = cpu_counters(server_mask)
     started = time.monotonic()
     if phase == "TELEPORT":
         for wave in range(seconds // 2):
             time.sleep(max(0, started + 2 * wave + 1 - time.monotonic()))
             coord = 80 if wave % 2 == 0 else -80
-            console.send(f"minecraft:tp @a {coord} -54 {coord}")
+            teleport_all(console, coord)
     elif phase == "DENSE" and mode == "verify":
         lifecycle = (
             (1, 'minecraft:summon minecraft:pig 32 -54 -20 {Tags:["spica_shadow_lifecycle"],NoAI:1b,NoGravity:1b}',
@@ -200,11 +214,13 @@ def measure(console, phase, seconds, server_mask, mode):
             console.send(command)
             console.wait(confirmation)
     time.sleep(max(0, started + seconds - time.monotonic()))
-    end_ns, end_cpu, _ = console.phase("IDLE")
+    end_ns, end_cpu, _, end_main, end_gc_count, end_gc_ms = console.phase("IDLE")
     finish_bg = cpu_counters(server_mask)
     cpu = (end_cpu - start_cpu) / 1e9
     total, busy = (finish_bg[i] - start_bg[i] for i in range(2))
     return {"phase": phase, "backend": mode, "window": window, "elapsed_s": (end_ns - start_ns) / 1e9, "cpu_s": cpu,
+            "main_cpu_s": (end_main - start_main) / 1e9 if start_main >= 0 and end_main >= 0 else None,
+            "gc_count": end_gc_count - start_gc_count, "gc_ms": end_gc_ms - start_gc_ms,
             "background_pct": 100 * max(0, busy - cpu) / total}
 
 
@@ -236,14 +252,14 @@ def summarize_rows(run, windows, minimum_samples, keep_short=False):
             metrics[field.replace("_ns", "_us")] = statistics.median(int(row[field]) for row in samples) / 1000
 
 
-def interleave(console, args):
+def interleave(console, args, checkpoint):
     windows = []
     turns = rotation(args)
     for phase in PHASES:
         print(f"interleaved {phase.lower()}", flush=True)
         place(console, phase)
         if phase == "TELEPORT":
-            console.send("minecraft:tp @a -80 -54 -80")
+            teleport_all(console, -80)
         for mode in turns[0]:
             console.phase("IDLE", mode)
             time.sleep(6)
@@ -253,6 +269,7 @@ def interleave(console, args):
                     console.phase("IDLE", mode)
                     time.sleep(DELTA_SETTLE_SECONDS)
                 windows.append(measure(console, phase, TURN_SECONDS, args.server_mask, mode) | {"turn": turn})
+        checkpoint.write_text(json.dumps(windows, indent=2), encoding="utf-8")
     return windows
 
 
@@ -277,17 +294,24 @@ def interleaved_summary(run, windows, modes):
                 ids = {str(window["window"]) for window in selected}
                 ticks = [sample for sample in samples if sample["window"] in ids]
                 lengths = sorted(float(sample["tick_ms"]) for sample in ticks)
+                elapsed = sum(w["elapsed_s"] for w in selected)
+                main_cpu = [w["main_cpu_s"] for w in selected]
                 metrics = {
                     "ticks": len(ticks), "tick_p99_ms": lengths[math.ceil(.99 * len(ticks)) - 1],
-                    "cpu_s_per_20s": 20 * sum(w["cpu_s"] for w in selected) / sum(w["elapsed_s"] for w in selected),
+                    "cpu_s_per_20s": 20 * sum(w["cpu_s"] for w in selected) / elapsed,
+                    "main_cpu_s_per_20s": 20 * sum(main_cpu) / elapsed if None not in main_cpu else None,
+                    "gc_count": sum(w["gc_count"] for w in selected),
+                    "gc_ms": sum(w["gc_ms"] for w in selected),
                     "background_pct_range": [min(w["background_pct"] for w in selected),
                                              max(w["background_pct"] for w in selected)],
                     "mobs": statistics.median(int(tick["mobs"]) for tick in ticks),
                     "median_upserts": statistics.median(int(tick["upserts"]) for tick in ticks),
                     "median_mob_checks": statistics.median(int(tick["mob_checks"]) for tick in ticks),
+                    "median_notifications": statistics.median(int(tick["notifications"]) for tick in ticks),
+                    "median_hash_lookups": statistics.median(int(tick["hash_lookups"]) for tick in ticks),
                     "removals": sum(int(tick["removals"]) for tick in ticks),
                 }
-                for field in ("total_ns", "index_ns", "evaluation_ns"):
+                for field in ("total_ns", "tick_path_ns", "event_ns", "index_ns", "evaluation_ns"):
                     metrics[field.replace("_ns", "_us")] = statistics.median(int(tick[field]) for tick in ticks) / 1000
                 report[phase][label][mode] = metrics
     return report
@@ -314,17 +338,22 @@ def run(args, probe, backend, name):
     java = [str(args.java), "-Xms2048M", "-Xmx2048M", "-XX:+UseG1GC",
             f"-XX:ActiveProcessorCount={args.server_mask.bit_count()}", "-Dterminal.jline=false", "-Dterminal.ansi=false",
             f"-Dspica.shadow.backend={backend}", f"-Dspica.shadow.library={args.native}"]
-    if args.movement:
+    if args.movement or args.hook_cost:
         java.append(args.movement_agent)
-        java.append("-Dspica.shadow.verifyDirty=true")
+        java.append("-Dspica.shadow.verifyDirect=true" if args.hook_cost else "-Dspica.shadow.verifyDirty=true")
+    if interleaved and args.hook_cost:
+        java.append("-Dpaper.playerconnection.keepalive=120")
     if verify:
         java.append("-Xcheck:jni")
     java.extend(("-jar", "purpur-1.21.4.jar", "nogui"))
     console_file = work / "console.log"
     bot = None
+    process_flags = subprocess.CREATE_NO_WINDOW
+    if interleaved and args.hook_cost:
+        process_flags |= subprocess.ABOVE_NORMAL_PRIORITY_CLASS
     with console_file.open("w", encoding="utf-8") as output, console_file.open(encoding="utf-8", errors="replace") as log:
         server = subprocess.Popen(java, cwd=work, stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT,
-                                  text=True, encoding="utf-8", creationflags=subprocess.CREATE_NO_WINDOW)
+                                  text=True, encoding="utf-8", creationflags=process_flags)
         console = Console(server, log, interleaved)
         try:
             pin(server, args.server_mask)
@@ -340,13 +369,18 @@ def run(args, probe, backend, name):
                 bot = subprocess.Popen([str(args.bots), "--host", "127.0.0.1", "--port", str(game_port), "--bots", "20",
                                         "--prefix", "ShadowBot", "--warmup", "2", "--duration", str(bot_duration),
                                         "--stagger-ms", "60", "--min-ready-pct", "100", "--json"], cwd=work, stdout=out,
-                                       stderr=err, creationflags=subprocess.CREATE_NO_WINDOW)
+                                       stderr=err, creationflags=process_flags)
                 pin(bot, args.bot_mask)
-                console.wait(r"ShadowBot020 joined the game", 60)
+                outstanding = {f"{index:03d}" for index in range(1, 21)}
+                join_deadline = time.monotonic() + 60
+                while outstanding:
+                    joined = console.wait(r"ShadowBot(\d{3}) joined the game", join_deadline - time.monotonic())
+                    outstanding.discard(joined.group(1))
+                console.require_bots = True
                 console.send("minecraft:gamemode spectator @a")
                 console.wait(r"Set ShadowBot\d{3}'s game mode to Spectator Mode")
                 if interleaved:
-                    windows = interleave(console, args)
+                    windows = interleave(console, args, work / "windows.json")
                 else:
                     windows = []
                     for phase in PHASES:
@@ -354,6 +388,7 @@ def run(args, probe, backend, name):
                         place(console, phase)
                         time.sleep(warmup + (initial_warmup if phase == "DENSE" else 0))
                         windows.append(measure(console, phase, seconds, args.server_mask, backend))
+                console.require_bots = False
                 console.send("chunkshadow dump")
                 console.wait(r"SHADOW_WRITTEN \d+")
                 if bot.wait(timeout=45) != 0:
@@ -399,17 +434,17 @@ def main():
     parser.add_argument("--rounds", type=int, choices=range(0, 4), default=3)
     parser.add_argument("--skip-verify", action="store_true")
     parser.add_argument("--interleave", action="store_true")
-    parser.add_argument("--incremental", action="store_true", help="Pair the current Rust pilot with the incremental pilot")
-    parser.add_argument("--movement", action="store_true", help="Pair incremental polling with the pinned test movement hook")
+    comparison = parser.add_mutually_exclusive_group()
+    comparison.add_argument("--incremental", action="store_true", help="Pair the current Rust pilot with the incremental pilot")
+    comparison.add_argument("--movement", action="store_true", help="Pair incremental polling with the pinned test movement hook")
+    comparison.add_argument("--hook-cost", action="store_true", help="Pair the original movement listener with direct slot lookup")
     args = parser.parse_args()
     if os.name != "nt" or not args.server_mask or not args.bot_mask or args.server_mask & args.bot_mask or args.seconds < 20:
         parser.error("Requires Windows, disjoint nonempty masks and at least twenty measurement seconds")
-    if args.movement and args.incremental:
-        parser.error("Select a single two-way comparison")
     args.output.mkdir(parents=True)
     probe = args.output / "ChunkTrackingShadow.jar"
-    make_probe(probe, args.movement)
-    if args.movement:
+    make_probe(probe, args.movement or args.hook_cost)
+    if args.movement or args.hook_cost:
         args.movement_agent = make_movement_agent(args)
     raw = {"server_mask": args.server_mask, "bot_mask": args.bot_mask, "fixture": stable_fixture(args.seed), "rounds": []}
     if not args.skip_verify:
