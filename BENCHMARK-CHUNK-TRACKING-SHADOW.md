@@ -93,3 +93,23 @@ Yukarıdaki komutta `--interleave` yerine `--incremental --rounds 0` vererek bu 
 Artımlı yol toplam aday hesaplama süresini 0,45–0,69 ms/tick azalttı. Tüm pencereler dahil edildiğinde de düşüş üç senaryoda %51,6–69,0 aralığındaydı. Kazanç dünya taramasının ve Java’da indeksin baştan kurulmasının kalkmasıyla geldi. Rust tarafında güncelleme ve sorgu birlikte çalıştığından JNI çağrısının kendi süresi eşleşen pencerelerde 36–119 µs bandından 50–149 µs bandına çıktı.
 
 JVM CPU ve tick p99 bütün sunucuyu kapsar. Örneğin dağınık senaryonun p99’u eşleşen iki çiftte %55,3 düştü, tüm sekiz çiftte %16,0 yükseldi. Bu örneklerle aday hesaplama süresindeki düşüş tekrarlanabilirdi. JVM CPU ve p99 farklarını artımlı indekse bağlamak için daha fazla eşleşen pencere gerekir.
+
+## Yalnız değişen mobları okuyan test kancası
+
+Stok Purpur 1.21.4-2416’da test mobu X=48,49’dan X=48,51’e aynı blok içinde taşındı. 20 botun tümü 48 blok menzilinin içinde gördüğü adayı bir sonraki tick’te kaybetti. Konum yazımı `EntityMoveEvent`, `EntityTeleportEvent`, dünyaya ekleme/çıkarma ve `ServerCommandEvent` bildirimlerinden hiçbirini üretmedi. Kontrol teleportunda normal teleport bildirimi alındı. Sadece bu olaylarla çalışan bir indeks 20 eski adayı tutardı.
+
+`--movement --rounds 0` seçeneği, yalnızca benchmark JVM’inde sınıf özetleri sabitlenmiş bir Java agent yükler. Agent X/Z yazımı tamamlandığında hareket eden mobu bildirir. Sağlık, ölüm ve kaldırma değişimleri de aday üyeliğini yeniden değerlendirmek için bildirilir. Java her dünyayı ilk etkinleştiğinde tarar. Sıcak yolda tick başına bir kez yalnız bildirim alan ve yaşam döngüsü değişen kayıtları okur. Aynı mobun bir tick’teki birden çok bildirimi tek kuyruğa alınır. Rust, aynı kalıcı chunk indeksini ve aynı toplu JNI sözleşmesini kullanır.
+
+A/B aynı test JVM’sinde `5a5966e` sürümünün konum tarama döngüsü ile bildirim kuyruğunu karşılaştırır. Tarama kolunda agent yüklenmiş ve bildirim tüketicisi kapalıdır. İki kollu önceki deneyle aynı eşleştirme kuralı kullanılır. Hesap süresine Java bildirimlerinin kuyruğa alınma süresi de eklenir. Agent ve denek eklentisi test çıktılarıdır. Üretim eklentisi aynı normal paketleme yolunu kullanır.
+
+42 dünya dosyasının SHA-256 özeti `5a5966e` ölçümüyle aynıydı. Ayrı `-Xcheck:jni` koşusunda 585 canlı tick boyunca tam tarama, taramalı Rust indeksi ve yalnız değişen kayıtları okuyan Rust indeksi birebir aynı aday kümelerini üretti. Bu kontrol aynı blok içindeki bildirimsiz konum yazımını, chunk’lar arası teleportu ve mobun kaldırılmasını içerdi.
+
+20 botun hazır kaldığı ve erken kopma olmayan A/B koşusunda 48 pencere ile 3.878 tick kaydedildi. Tabloda arka plan yükü eşleşen 13 çiftin 2.119 tick’i kullanıldı. Metinler önce `5a5966e` taramasını, ardından kuyruklu yolu gösterir.
+
+| Senaryo | Eşleşen çift | X/Z okunan mob/tick | Hesap µs/tick, JNI dahil | JVM CPU-s / 20 sn | Tick p99 (ms) |
+|---|---:|---:|---:|---:|---:|
+| Yoğun farm | 4/8 | 1.030 → 313,5 (−%69,6) | 397,9 → 269,0 (−%32,4) | 46,83 → 32,95 (−%29,6) | 35,42 → 30,24 (−%14,6) |
+| Dağınık | 6/8 | 1.030 → 414,5 (−%59,8) | 370,8 → 319,0 (−%14,0) | 26,17 → 29,07 (+%11,1) | 31,32 → 34,10 (+%8,9) |
+| Teleport | 3/8 | 1.030 → 349 (−%66,1) | 337,4 → 247,4 (−%26,7) | 12,30 → 13,19 (+%7,2) | 38,33 → 45,24 (+%18,0) |
+
+Toplam aday süresi tick başına 0,052–0,129 ms azaldı. Bütün pencerelerde de aday süresi %14,4–30,1 daha düşüktü. İki yol aynı değişiklikleri toplu gönderdiği için JNI’ye giren satır sayısı benzer kaldı. Kazanç Java’nın konum okumalarını sınırlamasından geldi. JVM CPU ve tick p99 iki senaryoda yükseldi. Bu ölçüm, aday hesabındaki kazancı gösterir ve sunucu genelinde tutarlı bir CPU veya p99 düşüşü göstermedi.
