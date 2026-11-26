@@ -135,7 +135,7 @@ impl Default for BackupConfig {
             compression_level: 3,
             flush_wait_ms: 15_000,
             snapshot_command: Vec::new(),
-            incremental_autosave: true,
+            incremental_autosave: false,
         }
     }
 }

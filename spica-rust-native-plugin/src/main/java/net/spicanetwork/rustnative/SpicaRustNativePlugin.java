@@ -16,6 +16,9 @@ import net.spicanetwork.rustnative.optimizer.RedstoneHopperGovernor;
 import net.spicanetwork.rustnative.optimizer.SurgeExplosionGuard;
 import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
+import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.event.HandlerList;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
@@ -78,29 +81,18 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
         }
 
         this.optimizer = new EntityLodOptimizer(api, aiOwnership);
-        this.optimizer.reloadConfig(getConfig());
 
         this.farmGovernor = new FarmVillagerGovernor(api, aiOwnership);
-        this.farmGovernor.reloadConfig(getConfig());
-        Bukkit.getPluginManager().registerEvents(farmGovernor, this);
 
         this.surgeGuard = new SurgeExplosionGuard(this, api);
-        this.surgeGuard.reloadConfig(getConfig());
-        Bukkit.getPluginManager().registerEvents(surgeGuard, this);
 
         this.mobTrackingOptimizer = new MobTrackingOptimizer(this, api);
-        this.mobTrackingOptimizer.reloadConfig(getConfig());
-        Bukkit.getPluginManager().registerEvents(mobTrackingOptimizer, this);
 
         this.redstoneGovernor = new RedstoneHopperGovernor(api, getLogger());
-        this.redstoneGovernor.reloadConfig(getConfig());
-        Bukkit.getPluginManager().registerEvents(redstoneGovernor, this);
 
-        this.brainIpcClient = createAndStartIpcClient();
         this.brainActuator = new BrainActuator(
-            api, optimizer, farmGovernor, surgeGuard, mobTrackingOptimizer, redstoneGovernor, brainIpcClient, getLogger()
+            api, optimizer, farmGovernor, surgeGuard, mobTrackingOptimizer, redstoneGovernor, null, getLogger()
         );
-        this.brainActuator.reloadConfig(getConfig());
 
         Bukkit.getServicesManager().register(SpicaRustAPI.class, api, this, ServicePriority.Normal);
 
@@ -111,12 +103,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
             cmd.setTabCompleter(executor);
         }
 
-        scheduleOptimizer();
-        scheduleFarmGovernor();
-        scheduleSurgeGuard();
-        scheduleMobTracking();
-        scheduleRedstoneGovernor();
-        scheduleBrain();
+        applyRuntimeConfig();
     }
 
     @Override
@@ -227,30 +214,64 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
         }
         if (redstoneGovernor != null) {
             redstoneGovernor.restoreAll();
-            redstoneGovernor.reloadConfig(getConfig());
         }
         if (mobTrackingOptimizer != null) {
             mobTrackingOptimizer.restoreAll();
-            mobTrackingOptimizer.reloadConfig(getConfig());
         }
         if (surgeGuard != null) {
             surgeGuard.resetPending();
-            surgeGuard.reloadConfig(getConfig());
         }
         if (farmGovernor != null) {
             farmGovernor.restoreAll();
-            farmGovernor.reloadConfig(getConfig());
         }
         if (optimizer != null) {
             optimizer.restoreAll();
             optimizer.resetDynamicRanges();
-            optimizer.reloadConfig(getConfig());
         }
 
-        this.brainIpcClient = createAndStartIpcClient();
-        if (brainActuator != null) {
-            brainActuator.setIpcClient(this.brainIpcClient);
-            brainActuator.reloadConfig(getConfig());
+        applyRuntimeConfig();
+    }
+
+    private void applyRuntimeConfig() {
+        FileConfiguration config = getConfig();
+        if (!config.getBoolean("gameplay-optimizations.enabled", false)) {
+            YamlConfiguration bridgeConfig = new YamlConfiguration();
+            bridgeConfig.setDefaults(config);
+            bridgeConfig.set("brain.enabled", false);
+            bridgeConfig.set("brain.actuation.enabled", false);
+            bridgeConfig.set("optimizer.enabled", false);
+            bridgeConfig.set("farm-governor.enabled", false);
+            bridgeConfig.set("surge-guard.enabled", false);
+            bridgeConfig.set("mob-tracking.enabled", false);
+            bridgeConfig.set("redstone-governor.enabled", false);
+            config = bridgeConfig;
+        }
+
+        optimizer.reloadConfig(config);
+        farmGovernor.reloadConfig(config);
+        surgeGuard.reloadConfig(config);
+        mobTrackingOptimizer.reloadConfig(config);
+        redstoneGovernor.reloadConfig(config);
+        brainActuator.reloadConfig(config);
+        brainIpcClient = createAndStartIpcClient(config);
+        brainActuator.setIpcClient(brainIpcClient);
+
+        HandlerList.unregisterAll(farmGovernor);
+        HandlerList.unregisterAll(surgeGuard);
+        HandlerList.unregisterAll(mobTrackingOptimizer);
+        HandlerList.unregisterAll(redstoneGovernor);
+        var manager = Bukkit.getPluginManager();
+        if (farmGovernor.isEnabled()) {
+            manager.registerEvents(farmGovernor, this);
+        }
+        if (surgeGuard.isEnabled()) {
+            manager.registerEvents(surgeGuard, this);
+        }
+        if (mobTrackingOptimizer.isEnabled()) {
+            manager.registerEvents(mobTrackingOptimizer, this);
+        }
+        if (redstoneGovernor.isEnabled()) {
+            manager.registerEvents(redstoneGovernor, this);
         }
 
         scheduleOptimizer();
@@ -261,11 +282,11 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
         scheduleBrain();
     }
 
-    private BrainIpcClient createAndStartIpcClient() {
-        String fallbackHost = getConfig().getString("brain.ipc-fallback-host", "127.0.0.1");
-        int fallbackPort = getConfig().getInt("brain.ipc-fallback-port", 0);
+    private BrainIpcClient createAndStartIpcClient(FileConfiguration config) {
+        String fallbackHost = config.getString("brain.ipc-fallback-host", "127.0.0.1");
+        int fallbackPort = config.getInt("brain.ipc-fallback-port", 0);
         BrainIpcClient client = new BrainIpcClient(fallbackHost, fallbackPort, getLogger());
-        if (getConfig().getBoolean("brain.enabled", true)) {
+        if (brainActuator.isBrainEnabled()) {
             client.start();
         }
         return client;
@@ -299,7 +320,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
             optimizerTask.cancel();
             optimizerTask = null;
         }
-        if (!getConfig().getBoolean("optimizer.enabled", true)) {
+        if (!optimizer.isEnabled()) {
             return;
         }
         long interval = Math.max(1L, getConfig().getLong("optimizer.interval-ticks", 10L));
@@ -312,7 +333,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
             farmGovernorTask.cancel();
             farmGovernorTask = null;
         }
-        if (!getConfig().getBoolean("farm-governor.enabled", true)) {
+        if (!farmGovernor.isEnabled()) {
             return;
         }
         long interval = Math.max(5L, getConfig().getLong("farm-governor.interval-ticks", 20L));
@@ -334,7 +355,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
             surgeGuardTask.cancel();
             surgeGuardTask = null;
         }
-        if (!getConfig().getBoolean("surge-guard.enabled", true)) {
+        if (!surgeGuard.isEnabled()) {
             return;
         }
         long interval = Math.max(1L, getConfig().getLong("surge-guard.elytra.interval-ticks", 10L));
@@ -356,7 +377,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
             mobTrackingTask.cancel();
             mobTrackingTask = null;
         }
-        if (!getConfig().getBoolean("mob-tracking.enabled", true)) {
+        if (!mobTrackingOptimizer.isEnabled()) {
             return;
         }
         long interval = Math.max(1L, getConfig().getLong("mob-tracking.interval-ticks", 6L));
@@ -378,7 +399,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
             redstoneGovernorTask.cancel();
             redstoneGovernorTask = null;
         }
-        if (!getConfig().getBoolean("redstone-governor.enabled", true)) {
+        if (!redstoneGovernor.isEnabled()) {
             return;
         }
         this.redstoneGovernorTask = Bukkit.getScheduler().runTaskTimer(
@@ -399,7 +420,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
             brainTask.cancel();
             brainTask = null;
         }
-        if (!getConfig().getBoolean("brain.enabled", true)) {
+        if (!brainActuator.isBrainEnabled()) {
             return;
         }
         long interval = Math.max(5L, getConfig().getLong("brain.tick-interval", 20L));

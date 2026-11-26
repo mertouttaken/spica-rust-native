@@ -186,6 +186,12 @@ Every push/PR to `main` and version tag (`v*`) runs [`.github/workflows/ci-relea
 - `GET http://127.0.0.1:9120/status` — Live JSON status snapshot
 - `GET http://127.0.0.1:9120/metrics` — Prometheus exposition metrics (`spica_mspt`, `spica_ewma_mspt`, `spica_tps`, `spica_entities`, `spica_hibernated_mobs`, `spica_farm_throttled_mobs`, `spica_villagers_throttled`, `spica_tracked_pairs_hidden`, `spica_redstone_chunks_throttled`, `spica_backups_completed_total`, `spica_last_backup_duration_ms`, `spica_brain_state`, `spica_host_cpu_percent`, etc.)
 
+### Rust bridge mode
+
+The default exposes the JNI engine, `SpicaRustAPI`, and on-demand diagnostics and benchmarks. Purpur handles entity AI, tracking, collisions, item merging, redstone, hoppers, elytra and world distances with its own settings. The plugin keeps its recovery hooks for entities tagged by a previous Spica run. To opt into the gameplay modules and adaptive Brain, set `gameplay-optimizations.enabled: true` in the plugin configuration. The individual module switches apply in that mode.
+
+For a bridge-only A/B, use the same Purpur settings, launcher and workload on both sides. Earlier no-plugin versus Spica results used gameplay optimization and measured the combined effect. Use `/rustbridge bench` and `/rustbridge kernels` to measure the cost of a computation delegated to Rust.
+
 ### Live snapshot backups
 
 Set `backup.snapshot_command` in `spica-launcher.toml` to the executable and optional fixed arguments for your filesystem snapshot provider. The launcher disables scheduled backups and rejects manual backups while this setting is empty.
@@ -196,7 +202,7 @@ snapshot_command = ["/absolute/path/to/snapshot-provider"]
 worlds = ["world", "world_nether", "world_the_end"]
 ```
 
-When a snapshot provider is configured, the launcher can spread background chunk saves across normal ticks using Paper's incremental autosave. On the stock configuration it starts Purpur with a private copy of the Paper settings, sets a 100-tick chunk save interval and limits automatic saves to four chunks per world per tick. The source files and per-world overrides remain in place. The profile applies to generated settings with Bukkit's default 6000-tick interval and Paper's default 24-chunk batch. Restart the launcher to apply source configuration edits. Use `backup.incremental_autosave = false` to use your Paper configuration directly.
+Purpur uses its own save settings by default. To opt into the launcher's incremental save profile, set `backup.incremental_autosave = true` and configure a snapshot provider. On the stock configuration it starts Purpur with a private copy of the Paper settings, sets a 100-tick chunk save interval and limits automatic saves to four chunks per world per tick. The source files and per-world overrides remain in place. The profile applies to generated settings with Bukkit's default 6000-tick interval and Paper's default 24-chunk batch. Restart the launcher to apply source configuration edits.
 
 Each backup runs `save-all flush` and requires the matching success response before snapshot creation. The launcher rejects reported save errors during the checkpoint. With the managed incremental profile it also rejects later backup requests after a reported write failure in the current Purpur process. Check the server's save error before restarting. Autosave flags and the full checkpoint for worlds and player data are preserved.
 
