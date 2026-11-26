@@ -17,6 +17,8 @@ import subprocess
 import time
 import zipfile
 
+from windows_jvm_cpu import CPU_GROUPS, JvmCpuSampler
+
 
 REPO = Path(__file__).resolve().parents[1]
 WORLDS = {"world": "world-heavy-v24-snapshot", "world_nether": "world_nether", "world_the_end": "world_the_end"}
@@ -28,6 +30,7 @@ MOVEMENT_MODES = ("incremental", "dirty")
 HOOK_COST_MODES = ("dirty", "direct")
 DELTA_SETTLE_SECONDS = 2
 TURN_SECONDS = 4
+ATTRIBUTION_TURN_SECONDS = 12
 BACKGROUND_MATCH_PP = 5.0
 POSITIONS = ((-80, 0), (80, 0), (0, -80), (0, 80), (80, 80))
 PLUGIN_PACKAGE = "net/spicanetwork/rustnative"
@@ -122,7 +125,11 @@ def paired_modes(args):
 
 def rotation(args):
     modes = paired_modes(args)
-    return (modes, modes[::-1]) * 4 if modes else TURNS
+    return (modes, modes[::-1]) * (3 if args.cpu_attribution else 4) if modes else TURNS
+
+
+def window_seconds(args):
+    return ATTRIBUTION_TURN_SECONDS if args.cpu_attribution else TURN_SECONDS
 
 
 def copy_fixture(seed, destination, probe, port):
@@ -190,11 +197,12 @@ def teleport_all(console, coord):
     console.wait(r"Teleported 20 entities to")
 
 
-def measure(console, phase, seconds, server_mask, mode):
+def measure(console, phase, seconds, server_mask, mode, cpu_sampler=None):
     start_ns, start_cpu, window, start_main, start_gc_count, start_gc_ms = console.phase(
         phase, mode if console.interleaved else None
     )
     start_bg = cpu_counters(server_mask)
+    os_start = cpu_sampler.snapshot() if cpu_sampler else None
     started = time.monotonic()
     if phase == "TELEPORT":
         for wave in range(seconds // 2):
@@ -215,6 +223,8 @@ def measure(console, phase, seconds, server_mask, mode):
             console.wait(confirmation)
     time.sleep(max(0, started + seconds - time.monotonic()))
     end_ns, end_cpu, _, end_main, end_gc_count, end_gc_ms = console.phase("IDLE")
+    if cpu_sampler:
+        cpu_sampler.record(window, os_start, cpu_sampler.snapshot())
     finish_bg = cpu_counters(server_mask)
     cpu = (end_cpu - start_cpu) / 1e9
     total, busy = (finish_bg[i] - start_bg[i] for i in range(2))
@@ -252,7 +262,7 @@ def summarize_rows(run, windows, minimum_samples, keep_short=False):
             metrics[field.replace("_ns", "_us")] = statistics.median(int(row[field]) for row in samples) / 1000
 
 
-def interleave(console, args, checkpoint):
+def interleave(console, args, checkpoint, cpu_sampler=None):
     windows = []
     turns = rotation(args)
     for phase in PHASES:
@@ -263,12 +273,17 @@ def interleave(console, args, checkpoint):
         for mode in turns[0]:
             console.phase("IDLE", mode)
             time.sleep(6)
+        if cpu_sampler:
+            cpu_sampler.discover_names()
         for turn, order in enumerate(turns, start=1):
             for mode in order:
                 if paired_modes(args):
                     console.phase("IDLE", mode)
                     time.sleep(DELTA_SETTLE_SECONDS)
-                windows.append(measure(console, phase, TURN_SECONDS, args.server_mask, mode) | {"turn": turn})
+                windows.append(measure(console, phase, window_seconds(args), args.server_mask, mode, cpu_sampler) | {"turn": turn})
+        if cpu_sampler:
+            cpu_sampler.discover_names()
+            cpu_sampler.finish(windows)
         checkpoint.write_text(json.dumps(windows, indent=2), encoding="utf-8")
     return windows
 
@@ -313,6 +328,14 @@ def interleaved_summary(run, windows, modes):
                 }
                 for field in ("total_ns", "tick_path_ns", "event_ns", "index_ns", "evaluation_ns"):
                     metrics[field.replace("_ns", "_us")] = statistics.median(int(tick[field]) for tick in ticks) / 1000
+                if "thread_cpu_s" in selected[0]:
+                    os_elapsed = sum(w["os_elapsed_s"] for w in selected)
+                    metrics["os_cpu_s_per_20s"] = 20 * sum(w["os_cpu_s"] for w in selected) / os_elapsed
+                    metrics["thread_cpu_s_per_20s"] = {
+                        group: 20 * sum(w["thread_cpu_s"][group] for w in selected) / os_elapsed for group in CPU_GROUPS
+                    }
+                    metrics["os_elapsed_s"] = os_elapsed
+                    metrics["max_thread_read_ms"] = max(w["thread_read_ms"] for w in selected)
                 report[phase][label][mode] = metrics
     return report
 
@@ -355,6 +378,7 @@ def run(args, probe, backend, name):
         server = subprocess.Popen(java, cwd=work, stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT,
                                   text=True, encoding="utf-8", creationflags=process_flags)
         console = Console(server, log, interleaved)
+        cpu_sampler = None
         try:
             pin(server, args.server_mask)
             console.wait(f"SHADOW_READY {backend.upper()}", 120)
@@ -364,7 +388,10 @@ def run(args, probe, backend, name):
             if interleaved:
                 turns = rotation(args)
                 settle = DELTA_SETTLE_SECONDS if paired_modes(args) else 0
-                bot_duration = 3 * (len(turns) * len(turns[0]) * (TURN_SECONDS + settle) + 6 * len(turns[0])) + 22
+                bot_duration = 3 * (len(turns) * len(turns[0]) * (window_seconds(args) + settle) + 6 * len(turns[0])) + 22
+                if args.cpu_attribution:
+                    cpu_sampler = JvmCpuSampler(server, args.java)
+                    bot_duration += 12
             with (work / "bots.json").open("w", encoding="utf-8") as out, (work / "bots.log").open("w", encoding="utf-8") as err:
                 bot = subprocess.Popen([str(args.bots), "--host", "127.0.0.1", "--port", str(game_port), "--bots", "20",
                                         "--prefix", "ShadowBot", "--warmup", "2", "--duration", str(bot_duration),
@@ -380,7 +407,9 @@ def run(args, probe, backend, name):
                 console.send("minecraft:gamemode spectator @a")
                 console.wait(r"Set ShadowBot\d{3}'s game mode to Spectator Mode")
                 if interleaved:
-                    windows = interleave(console, args, work / "windows.json")
+                    windows = interleave(console, args, work / "windows.json", cpu_sampler)
+                    if cpu_sampler:
+                        (work / "thread-catalogue.json").write_text(json.dumps(cpu_sampler.catalogue(), indent=2), encoding="utf-8")
                 else:
                     windows = []
                     for phase in PHASES:
@@ -394,6 +423,8 @@ def run(args, probe, backend, name):
                 if bot.wait(timeout=45) != 0:
                     raise RuntimeError(f"Bot run failed in {work}")
         finally:
+            if cpu_sampler:
+                cpu_sampler.close()
             if bot and bot.poll() is None:
                 bot.terminate()
                 bot.wait(timeout=10)
@@ -404,7 +435,7 @@ def run(args, probe, backend, name):
     if bots["readyPlay"] != 20 or bots["disconnectedEarly"] != 0:
         raise RuntimeError(f"Expected 20 ready bots and zero early drops in {work}")
     (work / "windows.json").write_text(json.dumps(windows, indent=2), encoding="utf-8")
-    summarize_rows(work, windows, 40 if interleaved else (60 if verify else 200), keep_short=interleaved)
+    summarize_rows(work, windows, 10 * window_seconds(args) if interleaved else (60 if verify else 200), keep_short=interleaved)
     if verify and not any(window["removals"] > 0 for window in windows if window["phase"] == "DENSE"):
         raise RuntimeError(f"Lifecycle probe did not observe a removal in {work}")
     modes = paired_modes(args) or ORDERS[0]
@@ -438,7 +469,9 @@ def main():
     comparison.add_argument("--incremental", action="store_true", help="Pair the current Rust pilot with the incremental pilot")
     comparison.add_argument("--movement", action="store_true", help="Pair incremental polling with the pinned test movement hook")
     comparison.add_argument("--hook-cost", action="store_true", help="Pair the original movement listener with direct slot lookup")
+    comparison.add_argument("--cpu-attribution", action="store_true", help="Repeat the hook A/B with long windows and OS thread CPU")
     args = parser.parse_args()
+    args.hook_cost = args.hook_cost or args.cpu_attribution
     if os.name != "nt" or not args.server_mask or not args.bot_mask or args.server_mask & args.bot_mask or args.seconds < 20:
         parser.error("Requires Windows, disjoint nonempty masks and at least twenty measurement seconds")
     args.output.mkdir(parents=True)

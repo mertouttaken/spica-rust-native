@@ -139,3 +139,33 @@ Ayrı JFR teşhis koşusunda ilk bot zaman aşımından önce 24 GC duraklaması
 Eski kolda Java bildirim işleyicisinin ölçülen medyan süresi yoğun, dağınık ve teleport pencerelerinde sırasıyla 112,4, 135,6 ve 81,3 µs/tick idi. Buna per-bildirim zamanlaması eşlik ediyordu. Yeni kolda saat okumaları kaldırıldığı için bu sayaç yeni işleyicinin süresini ölçmüyor. Hash araması ve tick başındaki JNI dahil süre her senaryoda düştü. Eşleşen pencerelerde p99 gerilerken dağınık ve teleport JVM CPU’su yükseldi.
 
 Teleportun sekizinci çiftinde yeni kol 246 ms GC süresi kaydetti. JVM CPU 12,25 → 25,76 CPU-s/20 sn ve ana iş parçacığı CPU’su 6,01 → 7,25 CPU-s/20 sn oldu. Bu CPU farkının yaklaşık %91’i ana iş parçacığı dışındaydı. Aynı çift iki taraftan çıkarıldığında kalan teleport pencerelerinde JVM CPU 20,90 → 17,17 (−%17,9) oldu. Bu duyarlılık kontrolüdür. Ana tabloda sekizinci çift de yer alır. Dağınık senaryoda yalnız iki çift eşleşti ve CPU farkının yönü çiftler arasında değişti.
+
+## Uzun A/B ve JVM CPU dağılımı
+
+`python -B` ile yukarıdaki koşucuya `--cpu-attribution --rounds 0` verildiğinde aynı `c8913f4` Java, agent ve Rust koduyla iki yol dönüşümlü çalışır. `DIRTY`, `9449861`in hash araması ve bildirim zamanlaması kullanan yoludur. `DIRECT`, `c8913f4`ün doğrudan yuva yoludur. Her senaryoda altı A/B çifti alınır ve her pencere 12 saniye sürer. Kol başına toplam 72 saniye, önceki 32 saniyenin 2,25 katıdır. Önceki deneydeki 5 yüzde puanlık arka plan eşleştirmesi kullanılır.
+
+Koşucu pencere sınırlarında Windows `GetProcessTimes` ve `GetThreadTimes` sayaçlarının farkını alır. HotSpot `jcmd Thread.print`, iş parçacıklarının adını ve işletim sistemi kimliğini pencere dışında eşler. Kimliğe oluşturulma zamanı da eklenir. Açık tutulan tutamaçlar pencere içinde sonlanan iş parçacığının biriktirdiği CPU zamanını korur. Ana iş parçacığı, G1/GC çalışanları, `Netty Server IO`, JIT ve adı bilinen Paper çalışanları ayrı ölçülür. Diğer CPU, süreç toplamından bu gruplar çıkarılarak bulunur. Bu kalem VM koordinasyonunu, adı eşlenemeyen iş parçacıklarını ve sayaç sınırlarının kısa okuma farkını da kapsar. [Windows iş parçacığı CPU sayaçları](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadtimes)
+
+GC çalışanlarının CPU süresi ve JVM’nin GC için geçen süre sayacı ayrı verilerdir. Netty kalemi, adı `Netty Server IO` olan JVM iş parçacıklarının CPU süresidir. Süreç toplamı ağın ana iş parçacığında veya başka çalışanlarda yaptığı işi de kapsar. Bu koşuda JFR kaydı açılmaz. Ölçüm kodu koşucuya aittir. Kanca, pilot ve aday hesabı derlenen `c8913f4` kaynaklarından gelir.
+
+Önceki deneyle aynı 42 dünya dosyası SHA-256 ile doğrulandı. Ayrı `-Xcheck:jni` koşusunda aday kümeleri 589 canlı tick boyunca eşleşti. Kontrol, API bildirimi gelmeyen aynı blok içi X/Z yazımını, teleportu ve mob kaldırmayı kapsadı. A/B koşusunda 20 botun tamamı hazır kaldı, kopma olmadı ve 760 keep-alive yanıtı alındı. 36 pencerede 8.702 tick ölçüldü. İlk tablo, arka plan yükü farkı en çok 5 yüzde puan olan 6 çiftin 2.908 tick’ini kullanır.
+
+Her hücre `DIRTY` → `DIRECT` sırasındadır. CPU değerleri 20 saniye duvar süresine ölçeklenen CPU saniyeleridir. GC ve Netty sütunlarındaki parantezler mutlak CPU farkıdır.
+
+| Senaryo | Eşleşen çift | JVM CPU | GC çalışanı CPU | Netty CPU | Tick p99 (ms) |
+|---|---:|---:|---:|---:|---:|
+| Yoğun farm | 2/6 | 58,81 → 55,98 (−%4,8) | 0,19 → 1,94 (+1,75) | 41,35 → 38,09 (−3,25) | 75,25 → 65,27 (−%13,3) |
+| Dağınık | 3/6 | 36,42 → 33,57 (−%7,8) | 2,25 → 1,03 (−1,22) | 23,28 → 21,75 (−1,52) | 44,90 → 47,90 (+%6,7) |
+| Teleport | 1/6 | 15,45 → 15,86 (+%2,7) | 0,13 → 0,00 (−0,13) | 7,15 → 7,10 (−0,05) | 44,35 → 40,34 (−%9,0) |
+
+Yoğun farmda Netty’deki 3,25 CPU-s düşüş, GC’deki 1,75 CPU-s artışa rağmen süreç toplamını aşağı çekti. Dağınık senaryoda Netty ve GC birlikte 2,75 CPU-s daha az çalıştı. Bu, eşleşen pencerelerdeki 2,85 CPU-s toplam düşüşün yaklaşık %96’sıydı. Teleportun tek eşleşen çiftinde en büyük artış JIT derleyicilerindeydi (+0,42 CPU-s). Ana iş parçacığı +0,16 CPU-s, GC ve Netty birlikte −0,18 CPU-s değişti. Bu çiftte toplam CPU artarken p99 düştü.
+
+JVM GC süre sayacı, eşleşen pencerelerde yoğun farm için 42 → 95 ms, dağınık için 196 → 130 ms, teleport için 21 → 0 ms kaydetti. İş parçacığı kataloğu 11 GC ve dört Netty iş parçacığını tanıdı. Süreç ve iş parçacığı sayaçlarının bir sınırdaki birlikte okunma süresi en çok 1,96 ms idi.
+
+| Tüm pencereler | JVM CPU | GC çalışanı CPU | Netty CPU | Tick p99 (ms) |
+|---|---:|---:|---:|---:|
+| Yoğun farm | 52,69 → 49,74 (−%5,6) | 0,71 → 1,62 | 37,96 → 35,35 | 60,29 → 48,70 (−%19,2) |
+| Dağınık | 34,54 → 34,76 (+%0,6) | 1,31 → 1,66 | 22,79 → 22,51 | 47,15 → 46,76 (−%0,8) |
+| Teleport | 16,14 → 16,00 (−%0,8) | 0,12 → 1,34 | 7,05 → 6,84 | 47,56 → 41,03 (−%13,7) |
+
+Yoğun farmda toplam CPU ve p99 düşüşünün yönü iki tabloda da aynı. Dağınık senaryoda CPU ve p99 farkının, teleportta da CPU farkının yönü pencere seçimiyle değişiyor. Teleport p99’u iki tabloda da düşük, ancak tek eşleşen çiftle etkinin büyüklüğü belirsiz. İş parçacığı dağılımı bu uzun koşudaki farkın bileşenlerini gösteriyor. Önceki koşudaki 246 ms GC kaydı geçmişe dönük olarak bu gruplara ayrıştırılamıyor.
