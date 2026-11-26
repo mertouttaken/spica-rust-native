@@ -3,6 +3,7 @@ mod brain;
 mod config;
 mod ipc;
 mod metrics_http;
+mod paper_autosave;
 mod preflight;
 mod supervisor;
 
@@ -89,7 +90,7 @@ fn print_usage() {
     println!("Calisma Sirasinda Dahili Konsol Komutlari:");
     println!("  :brain            Canli Rust Brain durumu, EWMA MSPT ve aktif direktif");
     println!("  :stats            Host CPU/RAM, JVM Heap, TPS ve varlik ozeti");
-    println!("  :backup           Zero-JVM-Overhead Rust dunya yedegi alir (save-off -> tar.gz -> save-on)");
+    println!("  :backup           Purpur kayit noktasi sonrasi dunya snapshot'ini arsivler");
     println!("  :restart          Purpur'u temiz durdurur ve yeniden baslatir");
     println!("  :stop             Purpur'u durdurur ve launcher'dan cikar");
     println!("  :help             Dahili komut listesini gosterir");

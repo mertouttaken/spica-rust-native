@@ -34,7 +34,6 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
     private RedstoneHopperGovernor redstoneGovernor;
     private BrainIpcClient brainIpcClient;
     private BrainActuator brainActuator;
-    private BackupCheckpointCommand backupCheckpoint;
     private BukkitTask optimizerTask;
     private BukkitTask farmGovernorTask;
     private BukkitTask surgeGuardTask;
@@ -48,8 +47,7 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
 
         PluginCommand checkpointCommand = getCommand("spicabackupcheckpoint");
         if (checkpointCommand != null) {
-            backupCheckpoint = new BackupCheckpointCommand(this);
-            checkpointCommand.setExecutor(backupCheckpoint);
+            checkpointCommand.setExecutor(new BackupCheckpointCommand(getLogger()));
         }
 
         try {
@@ -123,10 +121,6 @@ public final class SpicaRustNativePlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
-        if (backupCheckpoint != null) {
-            backupCheckpoint.cancel();
-            backupCheckpoint = null;
-        }
         if (brainTask != null) {
             brainTask.cancel();
             brainTask = null;

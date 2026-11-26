@@ -1,6 +1,7 @@
 use crate::backup::{create_snapshot_backup, BackupCancelGate, BackupOutcome};
 use crate::brain::BrainState;
 use crate::config::{generate_auth_token, BackupConfig, LauncherConfig};
+use crate::paper_autosave;
 use crate::preflight::JvmPlan;
 use std::io::BufRead;
 use std::process::Stdio;
@@ -316,9 +317,16 @@ async fn initiate_backup_transaction(
     backup_phase: &mut BackupPhase,
     child_stdin: &mut Option<ChildStdin>,
     config: &BackupConfig,
+    autosave_write_failed: bool,
 ) {
     if config.snapshot_command.is_empty() {
         eprintln!("[SpicaBackup] HATA: Canli yedek icin backup.snapshot_command gerekli.");
+        return;
+    }
+    if autosave_write_failed {
+        eprintln!(
+            "[SpicaBackup] HATA: Bu Purpur surecinde otomatik kayit yazma hatasi bildirildi."
+        );
         return;
     }
     let id = generate_auth_token();
@@ -469,9 +477,21 @@ pub async fn run_supervisor(
             plan.resolved_gc
         );
 
-        let mut child = Command::new(&plan.java_bin)
+        let paper_autosave = match paper_autosave::prepare(&plan.work_dir, &cfg.backup) {
+            Ok(profile) => profile,
+            Err(err) => {
+                eprintln!("[SpicaBackup] Artimli kayit profili hazirlanamadi: {err}");
+                None
+            }
+        };
+        let mut command = Command::new(&plan.java_bin);
+        command.args(&plan.args);
+        if let Some(profile) = &paper_autosave {
+            command.arg("--paper-dir").arg(profile.directory());
+            println!("[SpicaBackup] Paper artimli kayit profili etkin (100 tick, 4 chunk/tick).");
+        }
+        let mut child = command
             .current_dir(&plan.work_dir)
-            .args(&plan.args)
             .env("SPICA_IPC_TOKEN", &plan.ipc_token)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -500,6 +520,7 @@ pub async fn run_supervisor(
         let mut requested_action = SupervisorAction::None;
         let mut force_kill_deadline: Option<tokio::time::Instant> = None;
         let mut backup_phase = BackupPhase::Idle;
+        let mut autosave_write_failed = false;
         let mut scheduled_backup_timer = if cfg.backup.enabled
             && !cfg.backup.snapshot_command.is_empty()
         {
@@ -525,6 +546,13 @@ pub async fn run_supervisor(
                     break status;
                 }
                 Some(event) = save_ev_rx.recv() => {
+                    // A later flush cannot certify a chunk whose earlier queued write failed.
+                    if event == CheckpointEvent::WriteFailure && paper_autosave.is_some() {
+                        autosave_write_failed = true;
+                        if let BackupPhase::Archiving { cancel_gate, .. } = &backup_phase {
+                            cancel_gate.request_cancel();
+                        }
+                    }
                     if let BackupPhase::WaitingCheckpoint { id, deadline, write_failed } = &mut backup_phase {
                         let (result_id, saved) = match event {
                             CheckpointEvent::Result { id, saved } => (id, saved),
@@ -538,8 +566,8 @@ pub async fn run_supervisor(
                         {
                             continue;
                         }
-                        if !saved || *write_failed {
-                            let reason = if *write_failed { "Purpur yazma hatasi bildirdi." }
+                        if !saved || *write_failed || autosave_write_failed {
+                            let reason = if *write_failed || autosave_write_failed { "Purpur yazma hatasi bildirdi." }
                                 else { "Purpur kayit noktasi basarisiz." };
                             backup_phase = BackupPhase::Idle;
                             eprintln!("[SpicaBackup] HATA: {reason}");
@@ -609,6 +637,7 @@ pub async fn run_supervisor(
                         &mut backup_phase,
                         &mut child_stdin,
                         &cfg.backup,
+                        autosave_write_failed,
                     )
                     .await;
                 }
@@ -634,6 +663,7 @@ pub async fn run_supervisor(
                                                 &mut backup_phase,
                                                 &mut child_stdin,
                                                 &cfg.backup,
+                                                autosave_write_failed,
                                             )
                                             .await;
                                         }

@@ -745,7 +745,7 @@ mod tests {
             require_all_worlds: false,
             compression_level: 3,
             flush_wait_ms: 500,
-            snapshot_command: Vec::new(),
+            ..BackupConfig::default()
         };
 
         let outcome = create_world_backup(&work_dir, &cfg).expect("backup should succeed");
@@ -821,7 +821,7 @@ mod tests {
             require_all_worlds: false,
             compression_level: 1,
             flush_wait_ms: 500,
-            snapshot_command: Vec::new(),
+            ..BackupConfig::default()
         };
 
         let first = create_world_backup(&work_dir, &cfg).expect("first backup");
@@ -861,7 +861,7 @@ mod tests {
             require_all_worlds: false,
             compression_level: 3,
             flush_wait_ms: 500,
-            snapshot_command: Vec::new(),
+            ..BackupConfig::default()
         };
 
         let gate = BackupCancelGate::new();
@@ -901,7 +901,7 @@ mod tests {
             require_all_worlds: false,
             compression_level: 3,
             flush_wait_ms: 500,
-            snapshot_command: Vec::new(),
+            ..BackupConfig::default()
         };
         let res = create_world_backup(&work_dir, &nested_cfg);
         assert!(res.is_err());
@@ -916,7 +916,7 @@ mod tests {
             require_all_worlds: true,
             compression_level: 3,
             flush_wait_ms: 500,
-            snapshot_command: Vec::new(),
+            ..BackupConfig::default()
         };
         let res_strict = create_world_backup(&work_dir, &strict_cfg);
         assert!(res_strict.is_err());

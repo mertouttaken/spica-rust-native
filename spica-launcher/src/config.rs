@@ -116,6 +116,7 @@ pub struct BackupConfig {
     pub compression_level: u32,
     pub flush_wait_ms: u64,
     pub snapshot_command: Vec<String>,
+    pub incremental_autosave: bool,
 }
 
 impl Default for BackupConfig {
@@ -134,6 +135,7 @@ impl Default for BackupConfig {
             compression_level: 3,
             flush_wait_ms: 15_000,
             snapshot_command: Vec::new(),
+            incremental_autosave: true,
         }
     }
 }

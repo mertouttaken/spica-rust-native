@@ -1,8 +1,4 @@
 # SpicaRustNative 2.6.0 (Purpur 1.21.4 Core + Rust Brain + Farm Governor + Surge Guard + Mob Tracking + Redstone/Hopper Governor + Arena Block Diff) Yapilandirmasi
-backup:
-  # Yedek oncesi dunya yazimlarini ayri tick'lerde sirala. Son save-all flush daima calisir.
-  prepare-checkpoint: true
-
 native:
   # 0 = Otomatik (-Dspica.native.threads varsa onu kullanir; yoksa max(2, cekirdek/2), en fazla 8).
   worker-threads: 0
