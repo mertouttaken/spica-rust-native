@@ -64,6 +64,18 @@ public final class RustNative {
     public static native String nativeGetInfo();
 
     /**
+     * Shadow benchmark query for a single world. Positions are interleaved X/Z doubles.
+     * The caller supplies the pilot's open-addressed table of long (chunk key, head mob index)
+     * entries and descending int mob links (-1 terminates an empty bucket or a chain).
+     * Writes a player-major long bitset and returns the number of pairs within 48 horizontal
+     * blocks, or -1 on an invalid buffer or index. Empty inputs return 0 and leave the output untouched.
+     */
+    public static native int nativeQueryTrackingChunks(
+        int playerCount, ByteBuffer playersXZ, int mobCount, ByteBuffer mobsXZ,
+        ByteBuffer chunkTable, ByteBuffer nextMob, ByteBuffer outPairs
+    );
+
+    /**
      * Batch Spatial-Hash Entity-Entity soft collision & neighbor density calculation.
      */
     public static native long nativeComputeCollisions(

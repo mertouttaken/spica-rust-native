@@ -6,6 +6,7 @@
 
 pub mod block_diff;
 pub mod c_abi;
+mod chunk_tracking;
 pub mod farm_governor;
 pub mod ffi_guard;
 pub mod flowfield;

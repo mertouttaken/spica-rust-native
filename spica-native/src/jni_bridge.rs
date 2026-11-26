@@ -19,8 +19,8 @@ use jni::JNIEnv;
 
 use crate::ffi_guard::{FfiGuardError, RawReadSpan, RawWriteSpan, SpanValidator};
 use crate::{
-    block_diff, farm_governor, flowfield, governor, heatmap, kernels, mob_tracker, noise,
-    redstone_guard, surge_guard,
+    block_diff, chunk_tracking, farm_governor, flowfield, governor, heatmap, kernels, mob_tracker,
+    noise, redstone_guard, surge_guard,
 };
 
 /// Inspects a Java DirectByteBuffer and registers it as a read-only span in `validator`.
@@ -100,6 +100,53 @@ pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_
 /// Explicit JNI ABI contract revision (R13): bumped whenever FFI safety or output layout changes,
 /// allowing `NativeLoader` to distinguish incompatible binaries even within the same package SemVer.
 const NATIVE_ABI_REV: u32 = 2;
+
+#[no_mangle]
+pub extern "system" fn Java_net_spicanetwork_rustnative_nativebridge_RustNative_nativeQueryTrackingChunks<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    player_count: jint,
+    players: JByteBuffer<'local>,
+    mob_count: jint,
+    mobs: JByteBuffer<'local>,
+    table: JByteBuffer<'local>,
+    next_mob: JByteBuffer<'local>,
+    pairs: JByteBuffer<'local>,
+) -> jint {
+    catch_unwind(AssertUnwindSafe(|| -> Result<jint, FfiGuardError> {
+        if !(0..=64).contains(&player_count) || !(0..=16_384).contains(&mob_count) {
+            return Ok(-1);
+        }
+        let p = player_count as usize;
+        let m = mob_count as usize;
+        if p == 0 || m == 0 {
+            return Ok(0);
+        }
+        let mut spans = SpanValidator::new();
+        let players = register_jni_read(&mut env, &mut spans, &players, 2 * p)?;
+        let mobs = register_jni_read(&mut env, &mut spans, &mobs, 2 * m)?;
+        let table =
+            register_jni_read(&mut env, &mut spans, &table, 2 * chunk_tracking::table_slots(m))?;
+        let next_mob = register_jni_read(&mut env, &mut spans, &next_mob, m)?;
+        let mut pairs = register_jni_write(&mut env, &mut spans, &pairs, (p * m).div_ceil(64))?;
+        // The caller owns all validated buffers exclusively throughout this synchronous query.
+        let count = unsafe {
+            chunk_tracking::query(
+                players.as_slice(),
+                mobs.as_slice(),
+                table.as_slice(),
+                next_mob.as_slice(),
+                pairs.as_mut_slice(),
+            )
+        };
+        Ok(count.unwrap_or(-1))
+    }))
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or(-1)
+}
 
 #[no_mangle]
 #[allow(unused_mut)]
