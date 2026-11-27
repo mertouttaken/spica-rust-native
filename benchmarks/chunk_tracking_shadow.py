@@ -277,7 +277,7 @@ def measure(console, phase, seconds, server_mask, mode, cpu_sampler=None, packet
     )
     start_bg = cpu_counters(server_mask)
     os_start = cpu_sampler.snapshot() if cpu_sampler else None
-    if console.netty_stages:
+    if console.netty_stages and cpu_sampler:
         os_start["stages"] = console.stage_snapshot
     packet_start = packet_sampler.snapshot() if packet_sampler else None
     started = time.monotonic()
@@ -301,7 +301,7 @@ def measure(console, phase, seconds, server_mask, mode, cpu_sampler=None, packet
     time.sleep(max(0, started + seconds - time.monotonic()))
     end_ns, end_cpu, _, end_main, end_gc_count, end_gc_ms = console.phase("IDLE")
     os_finish = cpu_sampler.snapshot() if cpu_sampler else None
-    if console.netty_stages:
+    if console.netty_stages and cpu_sampler:
         os_finish["stages"] = console.stage_snapshot
     packets = packet_sampler.delta(packet_start, packet_sampler.snapshot(), os_start, os_finish) if packet_sampler else {}
     finish_bg = cpu_counters(server_mask)
@@ -496,7 +496,7 @@ def run(args, probe, backend, name, verify_dirty=False):
     print(f"{name} starting", flush=True)
     verify = backend == "verify"
     interleaved = backend == "interleaved"
-    stage_mode = interleaved and args.netty_stages
+    stage_mode = args.netty_stages and (interleaved or verify)
     seconds, warmup = (10, 5) if verify else (args.seconds, 8)
     java = [str(args.java), "-Xms2048M", "-Xmx2048M", "-XX:+UseG1GC",
             f"-XX:ActiveProcessorCount={args.server_mask.bit_count()}", "-Dterminal.jline=false", "-Dterminal.ansi=false",
@@ -505,7 +505,7 @@ def run(args, probe, backend, name, verify_dirty=False):
         java.append(f"{args.movement_agent}|{args.netty_clock}" if stage_mode else args.movement_agent)
         checks_dirty = verify_dirty or not args.hook_cost
         java.append("-Dspica.shadow.verifyDirty=true" if checks_dirty else "-Dspica.shadow.verifyDirect=true")
-    if interleaved and args.hook_cost:
+    if (interleaved or stage_mode) and args.hook_cost:
         java.append("-Dpaper.playerconnection.keepalive=120")
     if stage_mode:
         java.append("-Dspica.shadow.nettyStages=true")
@@ -587,7 +587,7 @@ def run(args, probe, backend, name, verify_dirty=False):
         raise RuntimeError(f"Purpur exited with {server.returncode} in {work}")
     if stage_mode:
         hooks = re.findall(r"SHADOW_NETTY_HOOK (\d+) ", console_file.read_text(encoding="utf-8", errors="replace"))
-        if sorted(hooks) != ["0", "1", "2"]:
+        if sorted(hooks) != ["0", "1", "2", "3", "4", "4", "5", "5", "5"]:
             raise RuntimeError(f"Missing or duplicate test-only Netty hooks: {hooks}")
     bots = json.loads((work / "bots.json").read_text(encoding="utf-8"))
     if bots["readyPlay"] != 20 or bots["disconnectedEarly"] != 0:

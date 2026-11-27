@@ -8,18 +8,24 @@ class NettyStageCpuTest(unittest.TestCase):
     def test_scales_by_each_threads_cpu_per_cycle(self):
         first, second = (101, 1), (102, 1)
         base = FILETIME_UNIX_OFFSET_MS
+        empty = ":0:0" * 6
         start = {"filetime": (base + 1_000) * 10_000, "threads": {first: 0, second: 0},
                  "thread_cycles": {first: 0, second: 0},
-                 "stages": parse_stage_snapshot("1000 101:3:0:0:0:0:0:0:0 102:3:0:0:0:0:0:0:0")}
+                 "stages": parse_stage_snapshot(f"1000 101:3:0{empty} 102:3:0{empty}")}
         finish = {"filetime": (base + 2_000) * 10_000, "threads": {first: 800, second: 250},
                   "thread_cycles": {first: 3_200, second: 3_200},
-                  "stages": parse_stage_snapshot("1990 101:3:0:10:1:160:2:5:1 102:3:0:8:1:320:2:4:1")}
+                  "stages": parse_stage_snapshot("1990 101:3:0:10:1:160:2:5:1:20:3:2:4:1:5 "
+                                                 "102:3:0:8:1:320:2:4:1:0:0:4:1:5:2")}
 
         report = attribute_stages(start, finish, {first: "Netty Server IO #1", second: "Netty Server IO #2"}, 1_000)
         self.assertAlmostEqual(report["stage_cpu_s"]["encode"], .1)
         self.assertAlmostEqual(report["stage_cpu_s"]["compression"], .065)
         self.assertAlmostEqual(report["stage_cpu_s"]["flush"], .05)
-        self.assertEqual(report["stage_samples"], {"encode": 2, "compression": 4, "flush": 2})
+        self.assertAlmostEqual(report["stage_cpu_s"]["event_loop"], .08)
+        self.assertAlmostEqual(report["stage_cpu_s"]["queue"], .104)
+        self.assertAlmostEqual(report["stage_cpu_s"]["buffer"], .082)
+        self.assertEqual(report["stage_samples"], {"encode": 2, "compression": 4, "flush": 2,
+                                                   "event_loop": 3, "queue": 5, "buffer": 7})
         self.assertEqual(report["stage_boundary_skew_ms"], 10)
 
         summary = stage_metrics([report | {"os_elapsed_s": 1}], packet_rate=100_000, netty_cpu_per_20s=21)
@@ -27,4 +33,5 @@ class NettyStageCpuTest(unittest.TestCase):
 
     def test_rejects_duplicate_thread_snapshots(self):
         with self.assertRaises(ValueError):
-            parse_stage_snapshot("1000 101:3:0:0:0:0:0:0:0 101:3:0:0:0:0:0:0:0")
+            sample = "101:3:0" + ":0:0" * 6
+            parse_stage_snapshot(f"1000 {sample} {sample}")

@@ -1,7 +1,7 @@
 """Scale sampled stage-cycle shares by each Netty thread's measured CPU time."""
 
-STAGES = ("encode", "compression", "flush")
-SAMPLE_WEIGHTS = (32, 1, 32)
+STAGES = ("encode", "compression", "flush", "event_loop", "queue", "buffer")
+SAMPLE_WEIGHTS = (32, 1, 32, 16, 128, 128)
 FILETIME_UNIX_OFFSET_MS = 11_644_473_600_000
 
 

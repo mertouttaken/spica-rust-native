@@ -235,3 +235,37 @@ Sayaçlar `DIRTY` → `DIRECT` sırasındadır. Netty zamanları, botların ald�
 Yoğun farmda eşleşen çiftlerdeki toplam fark +0,033 µs/paketti. Dağınık senaryoda kalan Netty işi 0,181 µs/paket azaldı ve flush 0,096 µs/paket arttı. Teleportta üç ölçülen aşama toplam 0,302 µs/paket azaldı. Bunların en büyük bileşeni 0,142 µs/paket ile sıkıştırmaydı. Kalan Netty işi de 0,216 µs/paket azaldı.
 
 Zamanlama eşiğini geçen tüm çiftler arka plan eşleştirmesi olmadan alındığında toplam Netty CPU/paket farkı yoğun farmda −%5,3, dağınık senaryoda +%7,2 ve teleportta +%0,3 oldu. Üç senaryoda da farkın yönü pencere seçimiyle değişti. Aşama tablosu işin eşleşen pencerelerde nereye dağıldığını gösterir. Kalıcı bir kazanım sonucu çıkarmak için bu gözlemler yetersiz.
+
+## Kalan Netty CPU’nun ayrıştırılması
+
+`--netty-stages --rounds 0`, `5afd223`’teki `DIRTY` ve `DIRECT` yollarını genişletilmiş ölçümle aynı JVM’de çalıştırır. Her iki kol aynı konum ve ağ test kancalarını kullanır. İşlemci maskeleri, 5 yüzde puanlık arka plan yükü filtresi ve 100 ms sayaç zamanlaması sınırı önceki koşudaki gibidir.
+
+| Aşama | Ölçülen kapsam |
+|---|---|
+| Event loop | `NioEventLoop.select`, `selectNow`, `selectAgain` ve hazır anahtarların `processSelectedKeys` ile işlenmesi. Hazır anahtarların işlenmesi, seçili başka aşamaya yazılmayan okuma tarafı işlerini de içerir. Yaklaşık 1/16 çağrı örneklenir. |
+| Kuyruk | `SingleThreadEventExecutor.offerTask` ve `pollTaskFrom` ile `ChannelOutboundBuffer.addMessage` ve `addFlush`. Ölçüm Netty sunucu I/O iş parçacıklarındaki çağrıları kapsar. Yaklaşık 1/128 çağrı örneklenir. |
+| Tampon | Havuzdan doğrudan ve heap `ByteBuf` ayırma, başvuru sayısını değiştirme, VarInt çerçeveleme ve sıkıştırma eşiği altındaki kopyalama. Yaklaşık 1/128 çağrı örneklenir. |
+
+İç içe çağrılarda encode, sıkıştırma ve `flush0` önceliklidir. Kuyruk ve tampon kapsama girdiğinde event loop saati durur. Süre, eşit öncelikli çağrılarda en dıştaki kapsama yazılır. Bu sayede aynı çağrı iki kaleme birden eklenmez. Kalan sütunu, Windows’un ölçtüğü Netty CPU toplamından altı aşamanın tahmini çıkarılarak hesaplanır. Kapsam dışında kalan görev çalıştırma, protokol işleme ve ölçüm ek yükü bu kaleme yansıyabilir. [Netty NIO event loop](https://netty.io/4.1/api/io/netty/channel/nio/NioEventLoop.html) · [Netty yazım kuyruğu](https://netty.io/4.1/api/io/netty/channel/ChannelOutboundBuffer.html) · [Netty tampon havuzu](https://netty.io/4.1/api/io/netty/buffer/PooledByteBufAllocator.html)
+
+42 dünya dosyasının SHA-256 özeti `5afd223` ölçümüyle eşleşti. Tam A/B, 20 hazır botla ve sıfır kopmayla 60 pencerede 9.601 tick kaydetti. Kısa pencere oluşmadı. Dağınık senaryoda bir çift zamanlama eşiğini aştı. Tablo yükü ve zamanlaması eşleşen 15 çiftin 4.800 tick’ini kullanır. Eşleşen çiftlerde arka plan yükü farkları JVM kümesinde en fazla 3,56, bot kümesinde 4,08 yüzde puandı. Aşama ve paket okumaları Windows CPU okumasına sırasıyla 8,20 ms ve 14,13 ms içinde kaldı.
+
+Değerler `DIRTY` → `DIRECT` sırasıyla botların aldığı Play paketi başına CPU mikrosaniyesidir. Önceki kapsama göre kalan, bu koşudaki event loop, kuyruk, tampon ve kalan sütunlarının toplamıdır.
+
+| Senaryo | Eşleşen çift | Event loop | Kuyruk | Tampon | Kalan | Önceki kapsama göre kalan | Toplam Netty |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Yoğun farm | 8/10 | 0,079 → 0,080 | 0,344 → 0,318 | 1,226 → 1,167 | 0,286 → 0,473 | 1,935 → 2,038 | 3,951 → 3,889 (−%1,6) |
+| Dağınık | 3/10 | 0,070 → 0,066 | 0,328 → 0,331 | 1,266 → 1,232 | 0,397 → 0,386 | 2,061 → 2,015 | 3,929 → 3,768 (−%4,1) |
+| Teleport | 4/10 | 0,450 → 0,493 | 0,473 → 0,475 | 1,618 → 1,643 | 0,237 → 0,527 | 2,779 → 3,139 | 8,251 → 9,027 (+%9,4) |
+
+| Senaryo | Önceki kalan sürenin açıklanan payı | Event loop örneği | Kuyruk örneği | Tampon örneği | Tick p99 (ms) |
+|---|---:|---:|---:|---:|---:|
+| Yoğun farm | %85,2 → %76,8 | 23.515 → 23.377 | 322.271 → 319.427 | 1.114.748 → 1.102.913 | 27,91 → 21,41 |
+| Dağınık | %80,7 → %80,8 | 6.188 → 6.179 | 89.419 → 89.355 | 309.019 → 309.226 | 29,12 → 28,26 |
+| Teleport | %91,5 → %83,2 | 2.147 → 2.198 | 18.252 → 18.630 | 67.864 → 69.121 | 26,98 → 25,29 |
+
+Tampon işlemleri her senaryoda üç yeni kalemin en büyüğüydü. Yoğun farmda kuyruk %7,4 ve tampon %4,8 azaldı. Dağınık senaryoda paket başına toplam düşüşün en büyük kalemi `flush0` (−0,108 µs) oldu. Teleporttaki +0,776 µs/paket toplam farkın +0,363 µs’si sıkıştırmaya, +0,290 µs’si kalan işe, +0,070 µs’si üç yeni kalemin toplamına düştü. Bu koşuda teleport için toplam farkın yönü `5afd223` ölçümünün tersiydi.
+
+Zamanlaması geçerli tüm çiftler alındığında toplam Netty CPU/paket farkı yoğun farmda −%3,9, dağınık senaryoda −%0,25 ve teleportta +%10,0 oldu. Örneklenmiş altı aşamanın toplam tahmini 15 tekil pencerede Windows toplamını aştı. Bu pencerelerin tamamı yük filtresi veya zamanlama sınırı nedeniyle ana tablo dışında kaldı. Ham tahminler korunur. Bu duyarlılık, aşama değerlerinin örneklem tahmini olarak okunmasını gerektirir.
+
+Genişletilmiş kancalar açıkken `-Xcheck:jni` ile `DIRTY` 575, `DIRECT` 578 canlı tick boyunca tam taramayla birebir aynı adayları üretti. Her iki kontrol de konum bildirimi gelmeyen menzil geçişini kapsadı. Üretim JAR’ı iki ajan ve saat DLL’i açısından kontrol edildi. Maven paketlemesi ve yedi Python testi geçti.

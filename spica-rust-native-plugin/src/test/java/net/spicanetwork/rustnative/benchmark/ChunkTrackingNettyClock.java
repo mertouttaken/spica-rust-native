@@ -7,8 +7,12 @@ public final class ChunkTrackingNettyClock {
     public static final int ENCODE = 0;
     public static final int COMPRESSION = 1;
     public static final int FLUSH = 2;
+    public static final int EVENT_LOOP = 3;
+    public static final int QUEUE = 4;
+    public static final int BUFFER = 5;
 
-    private static final int SAMPLE_MASK = 31;
+    private static final int[] PRIORITY = {2, 2, 2, 0, 1, 1};
+    private static final int[] SAMPLE_MASK = {31, 0, 31, 15, 127, 127};
     private static final long UNSAMPLED = -2;
     private static final ConcurrentLinkedQueue<Worker> WORKERS = new ConcurrentLinkedQueue<>();
     private static final ThreadLocal<Worker> LOCAL = ThreadLocal.withInitial(() -> {
@@ -34,7 +38,11 @@ public final class ChunkTrackingNettyClock {
 
     public static Worker enter(int stage) {
         Worker worker = LOCAL.get();
-        if (worker == null || worker.active) {
+        if (worker == null) {
+            return null;
+        }
+        int parent = worker.depth - 1;
+        if (parent >= 0 && PRIORITY[worker.stage[parent]] >= PRIORITY[stage]) {
             return null;
         }
         int next = worker.random;
@@ -42,24 +50,35 @@ public final class ChunkTrackingNettyClock {
         next ^= next >>> 17;
         next ^= next << 5;
         worker.random = next;
-        worker.active = true;
-        worker.stage = stage;
-        worker.start = stage == COMPRESSION || (next & SAMPLE_MASK) == 0 ? cycles() : UNSAMPLED;
+        boolean sampled = (next & SAMPLE_MASK[stage]) == 0;
+        boolean parentSampled = parent >= 0 && worker.start[parent] != UNSAMPLED;
+        long at = sampled || parentSampled ? cycles() : UNSAMPLED;
+        if (parentSampled) {
+            worker.addSegment(parent, at);
+        }
+        int slot = worker.depth++;
+        worker.stage[slot] = stage;
+        worker.start[slot] = sampled ? at : UNSAMPLED;
+        worker.elapsed[slot] = 0;
         return worker;
     }
 
     public static Worker enterCompression(int bytes, int threshold) {
-        return bytes >= threshold ? enter(COMPRESSION) : null;
+        return enter(bytes >= threshold ? COMPRESSION : BUFFER);
     }
 
     public static void exit(Worker worker) {
         if (worker == null) {
             return;
         }
-        long end = worker.start == UNSAMPLED ? UNSAMPLED : cycles();
-        worker.active = false;
-        if (end != UNSAMPLED) {
-            worker.record(end);
+        int slot = --worker.depth;
+        if (worker.start[slot] != UNSAMPLED) {
+            worker.addSegment(slot, cycles());
+            worker.record(worker.stage[slot], worker.elapsed[slot]);
+        }
+        int parent = slot - 1;
+        if (parent >= 0 && worker.start[parent] != UNSAMPLED) {
+            worker.start[parent] = cycles();
         }
     }
 
@@ -74,13 +93,15 @@ public final class ChunkTrackingNettyClock {
     public static final class Worker {
         private final long id = threadId();
         private final long overhead = calibrate();
-        private final long[] used = new long[3];
-        private final long[] count = new long[3];
+        private final long[] used = new long[PRIORITY.length];
+        private final long[] count = new long[PRIORITY.length];
+        // Each accepted child has a strictly higher priority, so there are at most three scopes.
+        private final int[] stage = new int[3];
+        private final long[] start = new long[3];
+        private final long[] elapsed = new long[3];
         private int random = (int) id ^ 0x6e747479;
-        private int stage;
-        private long start;
+        private int depth;
         private long errors;
-        private boolean active;
 
         private static long calibrate() {
             long minimum = Long.MAX_VALUE;
@@ -94,12 +115,20 @@ public final class ChunkTrackingNettyClock {
             return minimum;
         }
 
-        private synchronized void record(long end) {
-            if (start < 0 || end < start || overhead == Long.MAX_VALUE) {
+        private void addSegment(int slot, long end) {
+            if (start[slot] < 0 || end < start[slot] || overhead == Long.MAX_VALUE) {
+                elapsed[slot] = -1;
+            } else if (elapsed[slot] >= 0) {
+                elapsed[slot] += Math.max(0, end - start[slot] - overhead);
+            }
+        }
+
+        private synchronized void record(int stage, long elapsed) {
+            if (elapsed < 0) {
                 errors++;
                 return;
             }
-            used[stage] += Math.max(0, end - start - overhead);
+            used[stage] += elapsed;
             count[stage]++;
         }
 
