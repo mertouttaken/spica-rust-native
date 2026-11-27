@@ -45,6 +45,7 @@ public final class ChunkTrackingShadow extends JavaPlugin implements Listener {
     private ChunkTrackingMovementCoverage movementCoverage;
     private final boolean verifyDirty = Boolean.getBoolean("spica.shadow.verifyDirty");
     private final boolean verifyDirect = Boolean.getBoolean("spica.shadow.verifyDirect");
+    private final boolean nettyStages = Boolean.getBoolean("spica.shadow.nettyStages");
     private boolean interleaved;
     private Phase phase = Phase.IDLE;
     private int window;
@@ -193,6 +194,9 @@ public final class ChunkTrackingShadow extends JavaPlugin implements Listener {
         long mainCpu = threads.isCurrentThreadCpuTimeSupported() ? threads.getCurrentThreadCpuTime() : -1;
         getLogger().info("SHADOW_PHASE " + phase + " " + System.nanoTime() + " " + os.getProcessCpuTime() + " " + window
             + " " + mainCpu + " " + gcCount + " " + gcMillis);
+        if (nettyStages) {
+            getLogger().info("SHADOW_NETTY_CLOCK " + window + " " + ChunkTrackingNettyClock.snapshot());
+        }
         return true;
     }
 

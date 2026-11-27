@@ -7,6 +7,7 @@ import re
 import subprocess
 import time
 
+from netty_stage_cpu import attribute_stages
 
 CPU_GROUPS = ("main", "gc", "netty", "jit", "paper_workers", "other")
 THREAD_HEADER = re.compile(r'^"([^"\r\n]+)"[^\r\n]*?\bnid=(0x[\da-f]+|\d+)\b', re.I | re.M)
@@ -57,12 +58,13 @@ class ThreadEntry(c.Structure):
 class JvmCpuSampler:
     """Keep native handles until the end so exiting threads retain their CPU counters."""
 
-    def __init__(self, process, java):
+    def __init__(self, process, java, include_cycles=False):
         self.process = process
         self.jcmd = Path(java).with_name("jcmd.exe")
         self.handles = {}
         self.names = {}
         self.boundaries = {}
+        self.include_cycles = include_cycles
         kernel = c.WinDLL("kernel32", use_last_error=True)
         entry = c.POINTER(ThreadEntry)
         filetime = c.POINTER(w.FILETIME)
@@ -74,6 +76,7 @@ class JvmCpuSampler:
         self.close_handle = self._bind(kernel.CloseHandle, w.BOOL, w.HANDLE)
         self.thread_times = self._bind(kernel.GetThreadTimes, w.BOOL, w.HANDLE, *([filetime] * 4))
         self.process_times = self._bind(kernel.GetProcessTimes, w.BOOL, w.HANDLE, *([filetime] * 4))
+        self.cycle_times = self._bind(kernel.QueryThreadCycleTime, w.BOOL, w.HANDLE, c.POINTER(c.c_ulonglong))
         self.system_time = self._bind(kernel.GetSystemTimePreciseAsFileTime, None, filetime)
 
     @staticmethod
@@ -139,19 +142,28 @@ class JvmCpuSampler:
             raise RuntimeError(f"Missing required live JVM thread names: {sorted(groups)}")
 
     def snapshot(self):
-        self._discover()
+        # Stage runs discover stable Netty workers during scenario warmup. Avoid scanning every OS
+        # thread between the JVM stage marker and the CPU counter read.
+        if not self.include_cycles:
+            self._discover()
         began = time.perf_counter_ns()
         wall = w.FILETIME()
         self.system_time(c.byref(wall))
         total = self._process_ticks(self.process)
         readings = {}
+        cycles = {}
         for identity, handle in self.handles.items():
             timing = self._times(self.thread_times, handle)
             if timing is None:
                 raise c.WinError(c.get_last_error())
             readings[identity] = timing[1]
+            if self.include_cycles and cpu_group(self.names.get(identity, "")) == "netty":
+                used = c.c_ulonglong()
+                if not self.cycle_times(handle, c.byref(used)):
+                    raise c.WinError(c.get_last_error())
+                cycles[identity] = used.value
         return {"monotonic": began, "filetime": self._ticks(wall), "process": total, "threads": readings,
-                "read_ms": (time.perf_counter_ns() - began) / 1e6}
+                "read_ms": (time.perf_counter_ns() - began) / 1e6, "thread_cycles": cycles}
 
     def _process_ticks(self, process):
         timing = self._times(self.process_times, int(process._handle))
@@ -172,6 +184,8 @@ class JvmCpuSampler:
             window.update(os_cpu_s=cpu_s, thread_cpu_s=parts,
                           os_elapsed_s=(finish["monotonic"] - start["monotonic"]) / 1e9,
                           thread_read_ms=max(start["read_ms"], finish["read_ms"]))
+            if self.include_cycles:
+                window.update(attribute_stages(start, finish, self.names, TICKS_PER_SECOND))
 
     def catalogue(self):
         return [{"tid": tid, "creation_filetime": created, "name": name, "group": cpu_group(name)}

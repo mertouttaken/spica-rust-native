@@ -18,6 +18,7 @@ import time
 import zipfile
 
 from windows_jvm_cpu import CPU_GROUPS, JvmCpuSampler
+from netty_stage_cpu import STAGES, parse_stage_snapshot
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -78,7 +79,7 @@ def make_probe(jar, movement):
     project = REPO / "spica-rust-native-plugin/target"
     with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as out:
         for file in sorted((project / "test-classes" / PLUGIN_PACKAGE / "benchmark").glob("ChunkTracking*.class")):
-            if movement and file.name == "ChunkTrackingPositionFeed.class":
+            if movement and (file.name == "ChunkTrackingPositionFeed.class" or file.name.startswith("ChunkTrackingNettyClock")):
                 continue
             out.write(file, file.relative_to(project / "test-classes").as_posix())
         rust_class = f"{PLUGIN_PACKAGE}/nativebridge/RustNative.class"
@@ -97,13 +98,17 @@ def make_movement_agent(args):
     asm = args.seed / "libraries/org/ow2/asm/asm/9.7.1/asm-9.7.1.jar"
     classes = REPO / "spica-rust-native-plugin/target/test-classes"
     built = args.output / "position-agent-classes"
+    sources = [str(REPO / "benchmarks/java" / name) for name in ("ChunkTrackingPositionAgent.java", "ChunkTrackingNettyAgent.java")]
     subprocess.run([str(args.java.with_name("javac.exe")), "--release", "21", "-cp", f"{classes};{asm}",
-                    "-d", str(built), str(REPO / "benchmarks/java/ChunkTrackingPositionAgent.java")], check=True,
+                    "-d", str(built), *sources], check=True,
                    creationflags=subprocess.CREATE_NO_WINDOW)
     feed = args.output / "position-feed.jar"
     with zipfile.ZipFile(feed, "w", zipfile.ZIP_DEFLATED) as out:
         entry = f"{PLUGIN_PACKAGE}/benchmark/ChunkTrackingPositionFeed.class"
         out.write(classes / entry, entry)
+        if args.netty_stages:
+            for file in sorted((classes / PLUGIN_PACKAGE / "benchmark").glob("ChunkTrackingNettyClock*.class")):
+                out.write(file, file.relative_to(classes).as_posix())
     agent = args.output / "position-agent.jar"
     with zipfile.ZipFile(agent, "w", zipfile.ZIP_DEFLATED) as out, zipfile.ZipFile(asm) as source:
         out.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\r\n"
@@ -114,6 +119,13 @@ def make_movement_agent(args):
             if entry.startswith("org/objectweb/asm/") and entry.endswith(".class"):
                 out.writestr(entry, source.read(entry))
     return f"-javaagent:{agent}={feed}"
+
+
+def make_netty_clock(output):
+    library = output / "netty_cycle_clock.dll"
+    subprocess.run(["rustc", "--edition=2021", "--crate-type=cdylib", "-O", "-o", str(library),
+                    str(REPO / "benchmarks/netty_cycle_clock.rs")], check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    return library
 
 
 def paired_modes(args):
@@ -157,10 +169,12 @@ def copy_fixture(seed, destination, probe, port):
 
 
 class Console:
-    def __init__(self, process, log, interleaved):
+    def __init__(self, process, log, interleaved, netty_stages=False):
         self.process = process
         self.log = log
         self.interleaved = interleaved
+        self.netty_stages = netty_stages
+        self.stage_snapshot = None
         self.require_bots = False
 
     def send(self, command):
@@ -169,23 +183,33 @@ class Console:
 
     def wait(self, pattern, timeout=50):
         deadline = time.monotonic() + timeout
+        pending = ""
         while time.monotonic() < deadline and self.process.poll() is None:
             line = self.log.readline()
-            if "SHADOW_FAILED" in line:
-                raise RuntimeError(line.strip())
-            if self.require_bots and re.search(r"ShadowBot\d{3} lost connection:", line):
-                raise RuntimeError(line.strip())
-            if match := re.search(pattern, line):
-                return match
             if not line:
-                time.sleep(.025)
+                time.sleep(.005 if self.netty_stages else .025)
+                continue
+            pending += line
+            if not pending.endswith("\n"):
+                continue
+            if "SHADOW_FAILED" in pending:
+                raise RuntimeError(pending.strip())
+            if self.require_bots and re.search(r"ShadowBot\d{3} lost connection:", pending):
+                raise RuntimeError(pending.strip())
+            if match := re.search(pattern, pending):
+                return match
+            pending = ""
         raise RuntimeError(f"Missing {pattern!r} in {self.log.name}")
 
     def phase(self, name, backend=None):
         command = f"chunkshadow {name.lower()}"
         self.send(f"{command} {backend}" if backend else command)
         match = self.wait(rf"SHADOW_PHASE {name} (-?\d+) (\d+) (\d+) (-?\d+) (\d+) (\d+)")
-        return tuple(int(value) for value in match.groups())
+        counters = tuple(int(value) for value in match.groups())
+        if self.netty_stages:
+            stages = self.wait(rf"SHADOW_NETTY_CLOCK {counters[2]} (\d+[^\r\n]*)")
+            self.stage_snapshot = parse_stage_snapshot(stages[1])
+        return counters
 
 
 class PacketSampler:
@@ -253,6 +277,8 @@ def measure(console, phase, seconds, server_mask, mode, cpu_sampler=None, packet
     )
     start_bg = cpu_counters(server_mask)
     os_start = cpu_sampler.snapshot() if cpu_sampler else None
+    if console.netty_stages:
+        os_start["stages"] = console.stage_snapshot
     packet_start = packet_sampler.snapshot() if packet_sampler else None
     started = time.monotonic()
     if phase == "TELEPORT":
@@ -275,6 +301,8 @@ def measure(console, phase, seconds, server_mask, mode, cpu_sampler=None, packet
     time.sleep(max(0, started + seconds - time.monotonic()))
     end_ns, end_cpu, _, end_main, end_gc_count, end_gc_ms = console.phase("IDLE")
     os_finish = cpu_sampler.snapshot() if cpu_sampler else None
+    if console.netty_stages:
+        os_finish["stages"] = console.stage_snapshot
     packets = packet_sampler.delta(packet_start, packet_sampler.snapshot(), os_start, os_finish) if packet_sampler else {}
     finish_bg = cpu_counters(server_mask)
     if cpu_sampler:
@@ -364,6 +392,15 @@ def packet_cpu_effects(baseline, candidate):
             "cost_cpu_s_per_20s": 20e-6 * (costs[1] - costs[0]) * statistics.mean(rates)}
 
 
+def stage_metrics(windows, packet_rate, netty_cpu_per_20s):
+    elapsed = sum(w["os_elapsed_s"] for w in windows)
+    cpu = {stage: sum(w["stage_cpu_s"][stage] for w in windows) / elapsed for stage in STAGES}
+    cpu["other_netty"] = netty_cpu_per_20s / 20 - sum(cpu.values())
+    return {"netty_stage_cpu_us_per_packet": {stage: 1e6 * value / packet_rate for stage, value in cpu.items()},
+            "netty_stage_samples": {stage: sum(w["stage_samples"][stage] for w in windows) for stage in STAGES},
+            "max_stage_boundary_skew_ms": max(w["stage_boundary_skew_ms"] for w in windows)}
+
+
 def interleaved_summary(run, windows, modes):
     with (run / "chunk-tracking.csv").open(newline="", encoding="utf-8") as stream:
         samples = list(csv.DictReader(stream))
@@ -372,12 +409,16 @@ def interleaved_summary(run, windows, modes):
         phase_windows = [window for window in windows if window["phase"] == phase]
         by_turn = defaultdict(list)
         has_packets = "packets" in phase_windows[0]
+        has_stages = "stage_cpu_s" in phase_windows[0]
         short_turns = {window["turn"] for window in phase_windows if "tick_p99_ms" not in window}
         skewed_turns = {
             w["turn"] for w in phase_windows
             if has_packets and w["packet_boundary_skew_ms"] + w["packet_read_ms"] / 2 > PACKET_BOUNDARY_LIMIT_MS
         }
         excluded_turns = short_turns | skewed_turns
+        if has_stages:
+            stage_skew_turns = {w["turn"] for w in phase_windows if w["stage_boundary_skew_ms"] > PACKET_BOUNDARY_LIMIT_MS}
+            excluded_turns |= stage_skew_turns
         for window in phase_windows:
             if window["turn"] not in excluded_turns:
                 by_turn[window["turn"]].append(window)
@@ -389,6 +430,8 @@ def interleaved_summary(run, windows, modes):
         report[phase] = {"short_turns": sorted(short_turns), "matched_turns": matched, "all": {}, "matched": {}}
         if has_packets:
             report[phase]["packet_skew_turns"] = sorted(skewed_turns)
+        if has_stages:
+            report[phase]["stage_skew_turns"] = sorted(stage_skew_turns)
         for label, turns in (("all", by_turn), ("matched", matched)):
             if not turns:
                 continue
@@ -426,6 +469,8 @@ def interleaved_summary(run, windows, modes):
                     metrics["max_thread_read_ms"] = max(w["thread_read_ms"] for w in selected)
                 if has_packets:
                     metrics.update(packet_metrics(selected, metrics["thread_cpu_s_per_20s"]["netty"] / 20))
+                if has_stages:
+                    metrics.update(stage_metrics(selected, metrics["packets_per_s"], metrics["thread_cpu_s_per_20s"]["netty"]))
                 report[phase][label][mode] = metrics
             if has_packets:
                 report[phase].setdefault("netty_cpu_effects", {})[label] = packet_cpu_effects(
@@ -451,16 +496,19 @@ def run(args, probe, backend, name, verify_dirty=False):
     print(f"{name} starting", flush=True)
     verify = backend == "verify"
     interleaved = backend == "interleaved"
+    stage_mode = interleaved and args.netty_stages
     seconds, warmup = (10, 5) if verify else (args.seconds, 8)
     java = [str(args.java), "-Xms2048M", "-Xmx2048M", "-XX:+UseG1GC",
             f"-XX:ActiveProcessorCount={args.server_mask.bit_count()}", "-Dterminal.jline=false", "-Dterminal.ansi=false",
             f"-Dspica.shadow.backend={backend}", f"-Dspica.shadow.library={args.native}"]
     if args.movement or args.hook_cost:
-        java.append(args.movement_agent)
+        java.append(f"{args.movement_agent}|{args.netty_clock}" if stage_mode else args.movement_agent)
         checks_dirty = verify_dirty or not args.hook_cost
         java.append("-Dspica.shadow.verifyDirty=true" if checks_dirty else "-Dspica.shadow.verifyDirect=true")
     if interleaved and args.hook_cost:
         java.append("-Dpaper.playerconnection.keepalive=120")
+    if stage_mode:
+        java.append("-Dspica.shadow.nettyStages=true")
     if verify:
         java.append("-Xcheck:jni")
     java.extend(("-jar", "purpur-1.21.4.jar", "nogui"))
@@ -472,7 +520,7 @@ def run(args, probe, backend, name, verify_dirty=False):
     with console_file.open("w", encoding="utf-8") as output, console_file.open(encoding="utf-8", errors="replace") as log:
         server = subprocess.Popen(java, cwd=work, stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT,
                                   text=True, encoding="utf-8", creationflags=process_flags)
-        console = Console(server, log, interleaved)
+        console = Console(server, log, interleaved, stage_mode)
         cpu_sampler = None
         try:
             pin(server, args.server_mask)
@@ -486,7 +534,7 @@ def run(args, probe, backend, name, verify_dirty=False):
                 scenario_duration = len(turns) * len(turns[0]) * (window_seconds(args) + settle) + 6 * len(turns[0])
                 bot_duration = len(PHASES) * scenario_duration + 22
                 if args.cpu_attribution:
-                    cpu_sampler = JvmCpuSampler(server, args.java)
+                    cpu_sampler = JvmCpuSampler(server, args.java, include_cycles=stage_mode)
                     bot_duration += 12
             packet_mode = interleaved and args.packet_attribution
             if packet_mode:
@@ -537,6 +585,10 @@ def run(args, probe, backend, name, verify_dirty=False):
             stop(server, console)
     if server.returncode != 0:
         raise RuntimeError(f"Purpur exited with {server.returncode} in {work}")
+    if stage_mode:
+        hooks = re.findall(r"SHADOW_NETTY_HOOK (\d+) ", console_file.read_text(encoding="utf-8", errors="replace"))
+        if sorted(hooks) != ["0", "1", "2"]:
+            raise RuntimeError(f"Missing or duplicate test-only Netty hooks: {hooks}")
     bots = json.loads((work / "bots.json").read_text(encoding="utf-8"))
     if bots["readyPlay"] != 20 or bots["disconnectedEarly"] != 0:
         raise RuntimeError(f"Expected 20 ready bots and zero early drops in {work}")
@@ -577,7 +629,9 @@ def main():
     comparison.add_argument("--hook-cost", action="store_true", help="Pair the original movement listener with direct slot lookup")
     comparison.add_argument("--cpu-attribution", action="store_true", help="Repeat the hook A/B with long windows and OS thread CPU")
     comparison.add_argument("--packet-attribution", action="store_true", help="Attribute Netty CPU to packet volume and cost")
+    comparison.add_argument("--netty-stages", action="store_true", help="Measure encode, compression and flush in the pinned test JVM")
     args = parser.parse_args()
+    args.packet_attribution = args.packet_attribution or args.netty_stages
     args.cpu_attribution = args.cpu_attribution or args.packet_attribution
     args.hook_cost = args.hook_cost or args.cpu_attribution
     if os.name != "nt" or not args.server_mask or not args.bot_mask or args.server_mask & args.bot_mask or args.seconds < 20:
@@ -587,6 +641,8 @@ def main():
     make_probe(probe, args.movement or args.hook_cost)
     if args.movement or args.hook_cost:
         args.movement_agent = make_movement_agent(args)
+    if args.netty_stages:
+        args.netty_clock = make_netty_clock(args.output)
     raw = {"server_mask": args.server_mask, "bot_mask": args.bot_mask, "fixture": stable_fixture(args.seed), "rounds": []}
     if not args.skip_verify:
         raw["verify"] = run(args, probe, "verify", "verify")

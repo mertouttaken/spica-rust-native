@@ -20,9 +20,13 @@ public final class ChunkTrackingPositionAgent implements ClassFileTransformer, O
     private static final String ACCESSOR = "Lnet/minecraft/network/syncher/EntityDataAccessor;";
     private static final String FEED = "net/spicanetwork/rustnative/benchmark/ChunkTrackingPositionFeed";
 
-    public static void premain(String feedJar, Instrumentation instrumentation) throws Exception {
-        instrumentation.appendToBootstrapClassLoaderSearch(new JarFile(feedJar));
+    public static void premain(String arguments, Instrumentation instrumentation) throws Exception {
+        String[] paths = arguments.split("\\|", 2);
+        instrumentation.appendToBootstrapClassLoaderSearch(new JarFile(paths[0]));
         instrumentation.addTransformer(new ChunkTrackingPositionAgent());
+        if (paths.length == 2) {
+            ChunkTrackingNettyAgent.premain(paths[1], instrumentation);
+        }
     }
 
     @Override

@@ -199,3 +199,39 @@ Hücreler `DIRTY` → `DIRECT` sırasındadır. Netty CPU ve iki etki 20 saniye 
 | Teleport | −0,015 | −0,875 | −0,890 | 25,12 → 19,65 (−%21,76) | 77,59 → 72,93 (−%6,01) |
 
 Yoğun farmda hacim azaldı, paket başına CPU arttı. Kalan %0,50 CPU düşüşü tüm pencereler alındığında %0,51 artışa döndü. Önceki %7,9 Netty CPU düşüşü bu koşuda tekrarlanmadı. Dağınık senaryoda altı çiftin dördünde Netty CPU azaldı. Birleşik düşüşün kaynağı paket başına CPU’ydu ve tüm pencerelerde Netty CPU %2,23 düştü. Teleportta eşleşen iki çiftte de paket başına CPU aşağıdaydı. Tüm pencereler alındığında Netty CPU düşüşü %5,24 oldu. İki eşleşen çift, teleport etkisinin büyüklüğünü genellemek için sınırlı. Paketlerin ortalama ağ boyutu üç senaryoda da %0,53’ten az değişti.
+
+## Paket başına Netty CPU’nun işlem aşamaları
+
+`--netty-stages --rounds 0`, `663f8ba`’daki `DIRTY` ve `DIRECT` yollarını aynı Purpur ve 20 botla tekrar karşılaştırır. Her iki kolda aynı test agent’ı ve bot ikilisi çalışır. Purpur 1.21.4 ve Netty 4.1.115.Final sınıflarının SHA-256 özetleri sabitlenir. Üç yöntemi saran agent ve ayrı saat DLL’i benchmark sırasında üretilir. Üretim eklentisi kaynakları ile Rust aday hesabı aynıdır.
+
+| Aşama | Ölçülen kapsam |
+|---|---|
+| Encode | Purpur `PacketEncoder.encode` ve çağırdığı paket codec’i, yaklaşık 1/32 çağrı örneklenir. |
+| Sıkıştırma | `CompressionEncoder.encode` içinde boyut eşiğine ulaşan paketlerin hazırlık, sıkıştırma ve yazım yolu, tüm çağrılar ölçülür. Bu fixture’da eşik 256 bayttır. |
+| Flush | Netty `AbstractChannel.AbstractUnsafe.flush0` ve bu çağrının sokete boşalttığı yazım kuyruğu, yaklaşık 1/32 çağrı örneklenir. |
+
+Saat, çağrıyı yürüten iş parçacığının Win32 CPU çevrimlerini okur. Ölçülen çağrılar için başlangıç kalibrasyonu çıkarılır. İç içe gelen çağrılar en dıştaki kapsama yazılır. Her iş parçacığı için aşamanın örnek ağırlıklı çevrimleri, o iş parçacığının aynı penceredeki toplam çevrimlerine oranlanır. Bu oran `GetThreadTimes` ile ölçülen CPU zamanına uygulanır. Böylece sabit bir işlemci frekansı varsaymadan aşama başına CPU tahmini elde edilir. Kalan Netty CPU, eşik altı sıkıştırma işleyicisi, çerçeve başlıkları, event loop işleri ve ölçüm ek yükü dahil diğer çalışmayı kapsar. Payda botların aldığı tüm Play paketleridir. [Windows QueryThreadCycleTime](https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-querythreadcycletime) · [Windows GetThreadTimes](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadtimes)
+
+Önceki deneydeki işlemci sabitlemesi ve iki işlemci kümesindeki 5 yüzde puanlık arka plan yükü filtresi kullanılır. Kararlı Netty çalışanları pencere dışında eşlenir. Paket ve aşama sayaçlarının sınırları Windows CPU sayacı sınırından ayrı ayrı en çok 100 ms uzakta olmalıdır. Aşama başına örnek sayıları ve ayrıştırılan CPU ham sonuçlarda saklanır.
+
+Ayrı `-Xcheck:jni` koşularında `DIRTY` 510, `DIRECT` 568 canlı tick boyunca tam taramayla birebir aynı aday kümelerini üretti. İki koşu da konum bildirimi gelmeden aynı blok içinde aday menzilinden çıkan mobu ve yaşam döngüsü değişimlerini kapsadı. Üretim JAR’ında benchmark ajanları, test sınıfları ve ölçüm DLL’i aranarak paket ayrımı doğrulandı.
+
+Tam tekrar 20 hazır botla ve sıfır kopmayla tamamlandı. `663f8ba` ölçümü, aday doğrulaması ve bu tekrarın 42 dünya dosyası SHA-256 ile eşleşti. Üç senaryoda 60 pencere ve 9.648 tick kaydedildi. Yoğun farmda iki çift sayaç zamanlaması eşiğini aştı. Aşağıda kalan pencerelerden arka plan yükü eşleşen 9 çiftin 2.870 tick’i kullanılır. Çiftler arasındaki en yüksek arka plan farkı JVM çekirdeklerinde 4,17, bot çekirdeklerinde 3,89 yüzde puandı. Bu çiftlerde aşama sayacının Windows CPU sayacından en büyük uzaklığı 14,47 ms, paket sayacı için hesaplanan üst sınır 11,33 ms oldu.
+
+Sayaçlar `DIRTY` → `DIRECT` sırasındadır. Netty zamanları, botların aldığı Play paketi başına CPU mikrosaniyesidir.
+
+| Senaryo | Eşleşen çift | Encode | Sıkıştırma | Flush | Kalan Netty | Toplam Netty |
+|---|---:|---:|---:|---:|---:|---:|
+| Yoğun farm | 2/10 | 0,449 → 0,447 | 0 → 0,00039 | 2,185 → 2,196 | 2,326 → 2,349 | 4,959 → 4,993 (+%0,7) |
+| Dağınık | 3/10 | 0,466 → 0,453 | 0,00035 → 0,00024 | 2,264 → 2,360 | 2,437 → 2,256 | 5,167 → 5,069 (−%1,9) |
+| Teleport | 4/10 | 0,789 → 0,736 | 3,179 → 3,037 | 1,943 → 1,837 | 2,680 → 2,464 | 8,591 → 8,073 (−%6,0) |
+
+| Senaryo | Paket/sn | Encode örnekleri | Sıkıştırma çağrıları | Flush örnekleri | Tick p99 (ms) |
+|---|---:|---:|---:|---:|---:|
+| Yoğun farm | 316.216 → 315.539 | 159.271 → 158.231 | 0 → 20 | 725 → 725 | 43,29 → 44,80 |
+| Dağınık | 242.510 → 239.351 | 183.687 → 180.130 | 20 → 20 | 850 → 867 | 43,61 → 41,04 |
+| Teleport | 36.760 → 33.837 | 37.147 → 36.525 | 46.380 → 45.680 | 2.234 → 2.049 | 37,60 → 40,33 |
+
+Yoğun farmda eşleşen çiftlerdeki toplam fark +0,033 µs/paketti. Dağınık senaryoda kalan Netty işi 0,181 µs/paket azaldı ve flush 0,096 µs/paket arttı. Teleportta üç ölçülen aşama toplam 0,302 µs/paket azaldı. Bunların en büyük bileşeni 0,142 µs/paket ile sıkıştırmaydı. Kalan Netty işi de 0,216 µs/paket azaldı.
+
+Zamanlama eşiğini geçen tüm çiftler arka plan eşleştirmesi olmadan alındığında toplam Netty CPU/paket farkı yoğun farmda −%5,3, dağınık senaryoda +%7,2 ve teleportta +%0,3 oldu. Üç senaryoda da farkın yönü pencere seçimiyle değişti. Aşama tablosu işin eşleşen pencerelerde nereye dağıldığını gösterir. Kalıcı bir kazanım sonucu çıkarmak için bu gözlemler yetersiz.
